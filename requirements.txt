@@ -1,0 +1,51 @@
+# AI and ML
+openai==1.95.0
+tiktoken==0.7.0
+
+# Database connections
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+mysql-connector-python==8.4.0
+PyMySQL==1.1.1
+
+# API framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Authentication and security
+python-multipart==0.0.9
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+
+# Environment / config
+python-dotenv==1.0.1
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# Vector database
+pinecone==5.3.1
+
+# Data science (CGM prediction pipeline)
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.5.2
+python-dateutil==2.9.0.post0
+
+# PDF processing
+PyPDF2==3.0.1
+
+# LangChain (pinned to 0.3.x — avoids 1.0.x breaking-change backtracking)
+langchain==0.3.7
+langchain-openai==0.2.8
+langchain-community==0.3.7
+
+# HTTP client
+httpx==0.27.2
+
+# Migrations
+alembic==1.13.3
+
+# Utilities
+typing-extensions==4.12.2
+
+matplotlib==3.9.2
