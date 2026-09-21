@@ -33,6 +33,7 @@ try:
         HospitalDocumentSearchTool,
         MedicationsTool,
         FoodlogTool,
+        FoodlogUploadersTool,
         ProtocolTool,
         PlanTool,
         DoctorPatientMappingTool,
@@ -198,7 +199,25 @@ your own memory of prior conversations.
 4. **get_foodlog** - Food log entries with type, description, and activity details
    - Returns top 10 latest food log records by default
    - Supports date filtering and patient search
-   - Use for: "food intake", "food logs", "nutrition data", etc.
+   - Use for a SPECIFIC named/identified patient: "food intake", "food logs", "nutrition data", etc.
+4a. **get_foodlog_uploaders_by_date** - Aggregate list of WHICH PATIENTS uploaded a food log on a given date
+   - Use for roster-wide questions with NO specific patient named, e.g.:
+     "who uploaded a food log today", "who and all uploaded yesterday",
+     "who uploaded a food log on 2026-09-15", "how many patients logged food today"
+   - Takes a required `date` parameter in YYYY-MM-DD format — resolve
+     "today"/"yesterday"/any relative phrase to a concrete date first, using
+     the current date context above, before calling this tool
+   - Takes an optional `include_items` parameter (default False). Set it to True
+     when the question ALSO asks what was eaten, e.g. "who uploaded today and what
+     did they eat", "show what everyone logged on 2026-09-15". Leave it False for
+     a plain "who uploaded" name list.
+   - When include_items=True, each patient's entry includes their food items —
+     follow the Food Log Entries with Images formatting rules below (render any
+     "url" as a Markdown image) for each item, grouped clearly under that patient's name
+   - Do NOT call get_foodlog once per patient to answer this kind of question —
+     always use this tool instead for a single, complete answer
+   - Restricted to medical staff (not available to the patient role)
+   - Only display patient NAMES in your answer — never show or mention patient IDs
 5. **get_protocols** - Treatment protocols and medical guidelines for patients
    - Returns detailed medical instructions, do's and don'ts, food protocols
    - Supports date filtering and patient search
@@ -285,7 +304,8 @@ your own memory of prior conversations.
   - "my doctor", "who is my doctor", "doctor details" → query_type="my_doctor"
   - "my DHA details" → query_type="my_dha"
   - "patients for doctor X" → query_type="doctor_patients"
-- Food intake/nutrition → get_foodlog
+- Food intake/nutrition for a specific patient → get_foodlog
+- "who uploaded a food log today/yesterday/on <date>", "how many uploaded food logs" → get_foodlog_uploaders_by_date
 - Treatment protocols/guidelines → get_protocols
 - **Sleep data (ONE SPECIFIC DATE only)** → get_specific_medical_value with reading_type="sleep"
   - For a RANGE of dates, "this week", "quality", "pattern", or a chart → use
@@ -377,6 +397,37 @@ your own memory of prior conversations.
      offering more — the user must always know how many exist in total.
    - For staff: "patients for doctor X" / "patients assigned to doctor 1212" → use get_doctor_patient_info with query_type="doctor_patients", doctor_id or doctor_name
    - NEVER use search_hospital_documents for doctor-patient relationship queries
+
+4b. **GENERAL GLUCOSE STATUS / HIGH-LOW PATTERN QUERIES — DETERMINISTIC, NO EXCEPTIONS**:
+   - These rules exist because the SAME question was previously answered two different ways
+     on two different runs. To stop that, the mapping below is fixed and must be followed
+     exactly every time — never decide case-by-case, never vary the tool or analysis_type
+     based on phrasing nuance, and never fall back to a "highest"/"lowest" LIMIT-based
+     analysis_type for these questions.
+   - For "how is the patient's glucose", "how is X's glucose/sugar", "glucose status",
+     "glucose summary" — with NO mention of "trend", "chart", "AGP", "profile", "TIR", or a
+     specific date/time — ALWAYS call get_specific_medical_value with reading_type="glucose"
+     and analysis_type="overview". Do NOT call get_glucose_trend or get_agp_chart for this
+     exact phrasing, and do NOT use analysis_type="highest"/"lowest" — only "overview" gives
+     a real full-period aggregate.
+   - For "when does glucose go high", "when do spikes happen", "what time does X's sugar
+     rise" → ALWAYS call get_specific_medical_value with reading_type="glucose" and
+     analysis_type="pattern_high".
+   - For "when does glucose go low", "when do drops/lows happen" → ALWAYS call
+     get_specific_medical_value with reading_type="glucose" and analysis_type="pattern_low".
+   - **RESPONSE FORMAT for overview**: report total_readings_in_period, average, lowest
+     (value + time), highest (value + time), and the period_covered — using the exact
+     values returned by the tool. Never substitute a value from a different call or a
+     prior turn, and never estimate a min/max yourself.
+   - **RESPONSE FORMAT for pattern_high/pattern_low**: only describe a specific hour as a
+     recurring pattern if its distinct_days is 2 or more. If every matching reading has
+     distinct_days=1 (or the top hour does), say plainly that this looks like an isolated
+     episode on that specific date, not a typical daily pattern — do not phrase a single
+     night's readings as "tends to happen around <hour>".
+   - If the same exact question is asked again later in the conversation, repeat this same
+     tool call again (do not reuse a cached answer from earlier in the conversation) so the
+     answer reflects the current data — the two calls should also be consistent with each
+     other since the underlying data and query are the same.
 
 5. **AGP / GLUCOSE PROFILE QUERIES**:
    - This section applies ONLY when the word "AGP" or "glucose profile" is explicitly
@@ -602,6 +653,14 @@ For ANY summary request, ALWAYS call get_patient_summary with parameters:
    - Example: "Today, you have slept for a total of 6 hours and 29 minutes." (includes all sleep stages except awake)
    - If breakdown is requested, use the sleep_breakdown data to provide details about deep sleep, light sleep, etc.
 
+4. **Food Log Entries with Images**:
+   - Each foodlog record may include a "url" field pointing to an uploaded image, alongside "type" and "description"
+   - If a record's "url" is present and non-empty, you MUST render it as a Markdown image so it displays visually: ![Food Log Image](the_url_value)
+   - Do NOT write the literal words "Food Log Image" as plain text in place of the picture — that text with no image is a placeholder failure, not an acceptable answer
+   - If "description" is also present alongside a "url", show both: the description text, then the image on its own line
+   - If a record has no "url" at all, describe it using only the "description" text (no image markdown)
+   - Never omit or skip an image-bearing entry — every entry with a url must have its image rendered, even when listing several entries in one response
+
 Remember: You provide data analysis and insights, not medical diagnosis. Always suggest consulting healthcare providers for concerning values or treatment decisions. For protocol and treatment queries, provide COMPLETE information as medical compliance requires full details."""),
                 MessagesPlaceholder("chat_history"),
                 ("human", "{input}"),
@@ -689,6 +748,7 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     HospitalDocumentSearchTool(),
                     MedicationsTool(),
                     FoodlogTool(),
+                    FoodlogUploadersTool(),  # Staff: aggregate 'who uploaded a food log on <date>' across their roster
                     ProtocolTool(),
                     PlanTool(),  # Staff can view any patient's plans
                     DoctorPatientMappingTool(),  # Staff can view all doctor-patient mappings

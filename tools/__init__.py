@@ -10,7 +10,7 @@ from .multi_patient_analysis_tool import MultiPatientAnalysisTool
 from .simple_medical_analysis_tool import SimpleMedicalAnalysisTool
 from .hospital_document_search_tool import HospitalDocumentSearchTool
 from .medications_tool import MedicationsTool
-from .foodlog_tool import FoodlogTool
+from .foodlog_tool import FoodlogTool, FoodlogUploadersTool
 from .protocol_tool import ProtocolTool
 from .plan_tool import PlanTool
 from .doctor_patient_mapping_tool import DoctorPatientMappingTool
@@ -31,6 +31,7 @@ __all__ = [
     'HospitalDocumentSearchTool',
     'MedicationsTool',
     'FoodlogTool',
+    'FoodlogUploadersTool',
     'ProtocolTool',
     'PlanTool',
     'DoctorPatientMappingTool',

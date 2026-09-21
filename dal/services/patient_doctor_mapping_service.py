@@ -165,6 +165,25 @@ class PatientDoctorMappingService:
             logger.error(f"Error retrieving patients for doctor {doctor_user_id}: {e}")
             return []
     
+    def get_all_active_patient_ids(self) -> List[int]:
+        """
+        Get IDs of all active patients system-wide (role_id == 1, status == 1).
+        Used for roles with can_access_all_patients (e.g. Health Coach) where
+        results shouldn't be limited to one doctor's own roster.
+
+        Returns:
+            List[int]: All active patient user IDs.
+        """
+        try:
+            results = self.db.query(Users.id).filter(
+                Users.role_id == 1,
+                Users.status == 1
+            ).all()
+            return [r[0] for r in results]
+        except Exception as e:
+            logger.error(f"Error retrieving all active patient IDs: {e}")
+            return []
+
     def get_primary_doctor(self, patient_id: int) -> Optional[Dict[str, Any]]:
         """
         Get the primary doctor for a patient

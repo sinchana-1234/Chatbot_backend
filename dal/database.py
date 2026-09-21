@@ -308,6 +308,22 @@ class DatabaseManager:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
     
+    def get_foodlog_uploaders_by_date(self, **kwargs) -> Dict[str, Any]:
+        """Delegate to foodlog service for aggregate 'who uploaded' queries"""
+        if not self.db:
+            self._get_session()
+        if not self.db:
+            return {"error": "Database connection failed"}
+
+        try:
+            service = self.foodlog_service
+            if not service:
+                return {"error": "Foodlog service unavailable"}
+            return service.get_foodlog_uploaders_by_date(**kwargs)
+        except Exception as e:
+            self._handle_db_error(e)
+            return {"error": f"Database error: {str(e)}"}
+
     def get_protocols(self, **kwargs) -> Dict[str, Any]:
         """Delegate to protocol service"""
         if not self.db:
@@ -430,6 +446,22 @@ class DatabaseManager:
             self._handle_db_error(e)
             return []
     
+    def get_all_active_patient_ids(self) -> List[int]:
+        """Delegate to patient doctor mapping service"""
+        if not self.db:
+            self._get_session()
+        if not self.db:
+            return []
+
+        try:
+            service = self.patient_doctor_mapping_service
+            if service:
+                return service.get_all_active_patient_ids()
+            return []
+        except Exception as e:
+            self._handle_db_error(e)
+            return []
+
     def get_primary_doctor(self, **kwargs) -> Optional[Dict[str, Any]]:
         """Delegate to patient doctor mapping service"""
         if not self.db:

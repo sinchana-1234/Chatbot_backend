@@ -5,7 +5,7 @@ Specific Medical Value Tool (PostgreSQL Version - Clean)
 
 import logging
 import json
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 from langchain.tools import BaseTool
 from sqlalchemy import text
@@ -18,15 +18,31 @@ logger = logging.getLogger(__name__)
 class SpecificMedicalValueTool(BaseTool):
     name: str = "get_specific_medical_value"
     description: str = (
-        "Get a SPECIFIC single medical reading (glucose, BP, SpO2, heart rate, "
-        "HRV, stress, or sleep) for one date or moment in time using PostgreSQL. "
-        "Use for: 'what was X's glucose at 3pm', 'sleep on July 5th', 'highest "
-        "reading this morning'. DO NOT use this for multi-day trends, patterns, "
-        "or anything that should be shown as a chart — use get_health_progress "
-        "instead for those (e.g. 'sleep quality this week', 'sleep trend', "
-        "'activity over the last N days', 'time in range'). If in doubt whether "
-        "the user wants one value or a trend across days, prefer "
-        "get_health_progress — it covers single values too, plus a chart."
+        "Get a SPECIFIC single medical reading, a TRUE full-period overview, or an "
+        "hour-of-day HIGH/LOW pattern for a patient's readings (glucose, BP, SpO2, "
+        "heart rate, HRV, stress, or sleep) using PostgreSQL. Set analysis_type to one of: "
+        "'specific' (default) — one reading at/near a given time, e.g. 'what was X's "
+        "glucose at 3pm'; "
+        "'overview' — for 'how is the patient's glucose', 'how is X's glucose doing', "
+        "'glucose summary/status' with NO chart/trend/AGP/TIR wording — returns a REAL "
+        "aggregate (count/min/max/avg computed over ALL matching rows, never a truncated "
+        "slice) plus the time each extreme occurred and the date range actually covered; "
+        "'pattern_high' — for 'when does glucose go high', 'when do spikes happen', "
+        "'what time does X's sugar rise' — buckets every reading above a threshold "
+        "(default 180 for glucose) by hour-of-day across the FULL history and reports, "
+        "per hour, how many DISTINCT CALENDAR DAYS contributed a reading — an hour with "
+        "distinct_days=1 is a single isolated episode, not a recurring pattern, and must "
+        "be reported as such; "
+        "'pattern_low' — same as pattern_high but for readings below a threshold "
+        "(default 70 for glucose), for 'when does glucose go low', 'when do drops/lows "
+        "happen'. "
+        "An optional threshold parameter overrides the default cutoff for pattern_high/"
+        "pattern_low. "
+        "DO NOT use this for multi-day trend CHARTS — use get_health_progress instead "
+        "for those (e.g. 'sleep quality this week', 'sleep trend', 'activity over the "
+        "last N days', 'time in range chart'). If the user explicitly wants a chart, "
+        "prefer get_health_progress; if they want a plain-language status/pattern answer "
+        "with no chart, use this tool's overview/pattern_high/pattern_low modes."
     )
 
     def set_user_context(self, user_context):
@@ -40,7 +56,8 @@ class SpecificMedicalValueTool(BaseTool):
         specific_time: Optional[str] = None,
         date_filter: Optional[str] = None,
         time_range: Optional[str] = None,
-        analysis_type: str = "specific"
+        analysis_type: str = "specific",
+        threshold: Optional[float] = None
     ) -> str:
 
         try:
@@ -252,7 +269,162 @@ class SpecificMedicalValueTool(BaseTool):
                         time_condition = f"(EXTRACT(HOUR FROM {time_col}) >= 21 OR EXTRACT(HOUR FROM {time_col}) <= 5)"
 
                 # -------------------------
-                # ANALYSIS TYPE
+                # OVERVIEW — true full-period aggregate, NEVER a truncated slice.
+                # Fixes the bug where "how is glucose" relabeled a value from a
+                # 10-row ORDER BY...LIMIT 10 slice as the real min/max.
+                # -------------------------
+                if analysis_type == "overview":
+                    agg_row = db.execute(
+                        text(f"""
+                            SELECT
+                                COUNT(*) AS cnt,
+                                MIN({column}) AS min_val,
+                                MAX({column}) AS max_val,
+                                AVG({column}) AS avg_val,
+                                MIN({time_col}) AS earliest,
+                                MAX({time_col}) AS latest
+                            FROM {table}
+                            WHERE patient_id = :patient_id
+                            AND {date_condition}
+                            AND {time_condition}
+                        """),
+                        params,
+                    ).fetchone()
+
+                    cnt = int(agg_row[0] or 0)
+                    if cnt == 0:
+                        return json.dumps({
+                            "message": f"No {reading_type} readings found for this patient in the requested period.",
+                            "patient_id": patient_id,
+                            "note": "Report exactly this — do not substitute or display another patient's data."
+                        })
+
+                    # Fetch the actual reading (with its timestamp) at the true
+                    # min and max — not from a limited/pre-sorted slice, but a
+                    # fresh, targeted lookup so the reported extremes are real.
+                    min_reading = db.execute(
+                        text(f"""
+                            SELECT {column}, {time_col} FROM {table}
+                            WHERE patient_id = :patient_id AND {date_condition} AND {time_condition}
+                            ORDER BY {column} ASC, {time_col} ASC LIMIT 1
+                        """),
+                        params,
+                    ).fetchone()
+                    max_reading = db.execute(
+                        text(f"""
+                            SELECT {column}, {time_col} FROM {table}
+                            WHERE patient_id = :patient_id AND {date_condition} AND {time_condition}
+                            ORDER BY {column} DESC, {time_col} ASC LIMIT 1
+                        """),
+                        params,
+                    ).fetchone()
+
+                    return json.dumps({
+                        "type": "overview",
+                        "reading_type": reading_type,
+                        "patient_id": patient_id,
+                        "total_readings_in_period": cnt,
+                        "average": round(float(agg_row[3]), 1) if agg_row[3] is not None else None,
+                        "lowest": {"value": float(min_reading[0]), "time": str(min_reading[1])},
+                        "highest": {"value": float(max_reading[0]), "time": str(max_reading[1])},
+                        "period_covered": {"from": str(agg_row[4]), "to": str(agg_row[5])},
+                        "note": (
+                            "This is a real aggregate computed over ALL matching readings "
+                            "in the period (no row limit) — count, average, lowest, and "
+                            "highest are all authoritative, not derived from a partial slice."
+                        )
+                    }, indent=2)
+
+                # -------------------------
+                # PATTERN_HIGH / PATTERN_LOW — hour-of-day bucketing across the
+                # FULL matching history, with distinct-day counts per hour so a
+                # single night's run of extreme readings can never be reported
+                # as a recurring daily pattern.
+                # -------------------------
+                if analysis_type in ("pattern_high", "pattern_low"):
+                    default_thresholds = {
+                        "glucose": {"pattern_high": 180, "pattern_low": 70},
+                        "blood_pressure": {"pattern_high": 140, "pattern_low": 90},
+                        "spo2": {"pattern_high": 100, "pattern_low": 92},
+                        "heart_rate": {"pattern_high": 100, "pattern_low": 60},
+                    }
+                    effective_threshold = threshold
+                    if effective_threshold is None:
+                        effective_threshold = default_thresholds.get(reading_type, {}).get(analysis_type)
+                    if effective_threshold is None:
+                        return json.dumps({
+                            "error": f"No default {analysis_type} threshold is defined for reading_type "
+                                     f"'{reading_type}'. Please pass an explicit threshold."
+                        })
+
+                    comparison = ">=" if analysis_type == "pattern_high" else "<="
+
+                    rows = db.execute(
+                        text(f"""
+                            SELECT
+                                {column} AS val,
+                                {time_col} AS ts,
+                                EXTRACT(HOUR FROM {time_col})::int AS hr,
+                                DATE({time_col}) AS day
+                            FROM {table}
+                            WHERE patient_id = :patient_id
+                            AND {date_condition}
+                            AND {time_condition}
+                            AND {column} {comparison} :threshold
+                        """),
+                        {**params, "threshold": effective_threshold},
+                    ).fetchall()
+
+                    if not rows:
+                        return json.dumps({
+                            "message": (
+                                f"No {reading_type} readings {comparison} {effective_threshold} "
+                                f"found for this patient in the requested period."
+                            ),
+                            "patient_id": patient_id,
+                            "threshold": effective_threshold
+                        })
+
+                    buckets: Dict[int, Dict[str, Any]] = {}
+                    all_days = set()
+                    for val, ts, hr, day in rows:
+                        hr = int(hr)
+                        all_days.add(day)
+                        b = buckets.setdefault(hr, {"count": 0, "days": set(), "examples": []})
+                        b["count"] += 1
+                        b["days"].add(day)
+                        if len(b["examples"]) < 3:
+                            b["examples"].append({"value": float(val), "time": str(ts)})
+
+                    hourly_pattern = [
+                        {
+                            "hour_of_day": hr,
+                            "count": b["count"],
+                            "distinct_days": len(b["days"]),
+                            "example_readings": b["examples"],
+                        }
+                        for hr, b in sorted(buckets.items(), key=lambda kv: -kv[1]["count"])
+                    ]
+
+                    return json.dumps({
+                        "type": analysis_type,
+                        "reading_type": reading_type,
+                        "threshold": effective_threshold,
+                        "total_matching_readings": len(rows),
+                        "total_distinct_days_with_data": len(all_days),
+                        "hourly_pattern": hourly_pattern,
+                        "interpretation_note": (
+                            "Only describe a genuine time-of-day PATTERN for hours where "
+                            "distinct_days is 2 or more (that hour showed extreme readings on "
+                            "multiple different days). An hour with distinct_days=1 means every "
+                            "matching reading in that bucket came from a single day/night — "
+                            "report that as an ISOLATED EPISODE on that specific date, never as "
+                            "a recurring daily pattern."
+                        )
+                    }, indent=2)
+
+                # -------------------------
+                # ANALYSIS TYPE (specific / highest / lowest — unchanged legacy behavior)
                 # -------------------------
                 if analysis_type == "highest":
                     order = "DESC"
