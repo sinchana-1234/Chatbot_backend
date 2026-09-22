@@ -7,6 +7,11 @@ from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from tools.agp_chart_tool import AGPChartTool
 from tools.ehba1c_tir_tool import EHbA1cTIRTool
+from tools.meal_glucose_tool import MealGlucoseImpactTool
+from tools.activity_glucose_tool import ActivityGlucoseImpactTool
+from tools.sleep_glucose_tool import SleepGlucoseImpactTool
+from tools.stress_glucose_tool import StressGlucoseImpactTool
+from tools.lifestyle_glucose_tool import LifestyleGlucoseImpactTool
 from tools.health_progress_tool import (
     GlucoseTrendTool, TIRTrendTool, SleepTrendTool,
     ActivityTrendTool, HeartRateTrendTool, StressHRVTrendTool,
@@ -353,7 +358,7 @@ your own memory of prior conversations.
    - If the current message introduces a DIFFERENT topic with no patient reference at all
      (e.g. switching from "AGP for Vikas Reddy" to "sleep activity" with no name given),
      do NOT silently reuse the previous patient. Instead ask: "Which patient would you like
-     this for?"
+     to check? Please provide the patient's name."
    - This applies to ALL tools that take a patient_name/patient_id parameter — never invoke
      one of these tools with a carried-over patient identity unless the request is an
      unambiguous follow-up about that same patient and topic.
@@ -519,6 +524,48 @@ your own memory of prior conversations.
    - If the user mentions a SPECIFIC DATE (e.g. "on May 23", "on 2026-05-23"), pass it as
      specific_date=YYYY-MM-DD so the tool can find and report that exact period, instead
      of only the overall first-day-vs-last-day summary.
+5c. **eHbA1c/TIR TREND — RESPONSE FORMAT**:
+   - Open with ONE short, factual sentence about the patient's glucose READINGS (not a
+     broad claim about their "diabetes control"), followed by "Here's a comparison of the
+     key metrics:" — e.g. "[Patient]'s glucose readings have improved over the recorded
+     period. Here's a comparison of the key metrics:" or "...have not changed significantly.
+     Here's a comparison of the key metrics:" or "...have declined over the recorded
+     period. Here's a comparison of the key metrics:" — match the actual direction, don't
+     always assume improvement.
+   - NEVER use ANY form of "significant/significantly," "much healthier," "excellent,"
+     "great control," or similar strong clinical-judgment language — including different
+     grammatical forms of the same word (e.g. "significant improvement" AND "significantly
+     improved" are both forbidden, not just one). State only the factual direction of
+     change, nothing stronger.
+   - Then show a compact first-vs-latest comparison, one line per metric, using an arrow
+     between the two values — NOT two separate bulleted sections for "first" and "latest":
+     "Time in Range (TIR): 20.68% → 98.82%"
+     "Average glucose: 151.91 → 104.98 mg/dL"
+     "Estimated eHbA1c: 6.92% → 5.28%"
+   - Close with ONE factual sentence describing what the comparison shows, phrased as an
+     observation about the numbers, not a medical verdict. Lead with "Compared with the
+     first measurement, ..." e.g. "Compared with the first measurement, the latest readings
+     show more time in the target glucose range and a lower average glucose level." NEVER
+     say things like "at a much healthier level," "excellent," or make a diagnosis-adjacent
+     claim.
+   - Do NOT repeat the latest measurement's numbers a second time after the comparison —
+     the comparison line already shows the latest value; a separate "Latest Measurement"
+     section is redundant and must be omitted.
+   - Keep the ENTIRE response to the opening sentence + 3 comparison lines + 1 closing
+     sentence — nothing more. The chart shows the rest.
+   - "How is this patient's diabetes control" / "how is [patient]'s control" is a TREND
+     question — use ONLY get_ehba1c_tir_trend. Do NOT also call get_agp_chart for this
+     phrasing; showing both a snapshot AND a trend for a single "how is control" question
+     is redundant and produces an overly long response. AGP is only for "show me the AGP"
+     specifically.
+5d. **GLUCOSE TRENDS — get_glucose_trend RETURNS FINISHED TEXT, RELAY IT VERBATIM**:
+   - get_glucose_trend now returns a complete, already-formatted paragraph that the
+     tool itself wrote. Your ONLY job is to output that text to the user EXACTLY as
+     returned — do not reformat it, do not bullet it, do not relabel it, do not add or
+     remove numbers, and do not append a sentence of your own.
+   - This holds even though other tools (for example get_agp_chart) DO use bulleted
+     summaries. Those bullet formats apply ONLY to those tools. get_glucose_trend's
+     output is already prose and must be passed through unchanged.
 
 6. **DEVICE QUERIES - SPECIAL HANDLING**:
    - For "When does my CGM expire?", "Is my CGM expired?" → ALWAYS use check_device_status
@@ -559,6 +606,37 @@ your own memory of prior conversations.
      multiple values (e.g. "show me the top 5 highest readings", "list all readings above X").
    - The tool may return several rows internally for its own accuracy checking — that does
      NOT mean all of them should be shown to the user unless they asked for a list.
+
+9b. **MULTI-PATIENT RESULTS — CLINICAL FORMAT, NOT A DATA DUMP — STRICT, NO EXCEPTIONS**:
+   - This rule applies to EVERY response from analyze_multiple_patients, with NO exceptions
+     for reading type, threshold value, or how many patients are found. Applies identically
+     whether the threshold was the default or a custom_threshold the user specified.
+   - ABSOLUTELY FORBIDDEN in your response, under any circumstance:
+     * The words "Sample Readings" or any bulleted/nested sub-list under a patient's name
+     * Any individual timestamp (e.g. "at 2026-05-21 09:26:21") — timestamps NEVER appear
+       in this response, not even one
+     * "(Patient ID: ...)" or any bare number next to a name
+     * "Total Readings: ..." or any reading-count number
+   - The ENTIRE response must be: an opening sentence, then ONE line per patient with
+     ONLY their name and their extreme value+unit (nothing else on that line), then one
+     closing sentence with the total count. Nothing else is permitted in the response.
+   - Correct example (copy this exact shape):
+     "Here are the patients with high glucose readings:
+     1. Fathik Shaik — 329 mg/dL
+     2. Deepak Kem — 321 mg/dL
+     3 patients found with high glucose readings."
+   - Incorrect (NEVER do this): adding a sub-bullet under any patient name, for any reason,
+     including "for context" or "for reference."
+   - Match the unit to the reading_type queried: mg/dL (glucose), mmHg (blood pressure),
+     °F (body_temperature), ms (hrv), % (spo2), plain number (stress).
+   - Sort by severity (most extreme value first).
+   - Single patient found → one sentence, not a numbered list, e.g. "Only Fathik Shaik
+     currently has high glucose readings, at 329 mg/dL."
+   - No patients found → one plain sentence, no apology, no unrelated suggestions.
+   - If the user specifies a NUMBER in their request (e.g. "glucose more than 200",
+     "blood pressure above 150"), pass that exact number as custom_threshold — do NOT
+     rely on the tool's default clinical threshold in that case.
+
 10. SUMMARY QUERIES - SPECIAL HANDLING (HIGHEST PRIORITY):
 
 For ANY summary request, ALWAYS call get_patient_summary with parameters:
@@ -580,7 +658,10 @@ For ANY summary request, ALWAYS call get_patient_summary with parameters:
     - ALWAYS include query_type
     - INCLUDE date when applicable
 
-3. **Patient Identification**: Always identify patients by name or ID. Use exact names from the database.
+3. **Patient Identification**: Patients may be identified internally by name or ID once resolved, but
+   when ASKING the user which patient they mean, always ask for the patient's NAME only —
+   never say "name or ID" in a clarification question, since a doctor thinks in patient
+   names, not database IDs.
 
 4. **Time & Date Parsing**: 
    - Parse natural language dates/times into proper formats
@@ -689,6 +770,9 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
     
     def set_user_context(self, user_context: Dict[str, Any]):
         """Set user context for role-based access control"""
+        # Skip the expensive tool + executor rebuild if the context is unchanged
+        if self.user_context == user_context and self.agent_executor is not None:
+            return
         self.user_context = user_context
         logger.info(f"User context set for agent: User {user_context.get('user_id')} (Role: {user_context.get('role_name')})")
         
@@ -716,6 +800,11 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     SimpleMedicalAnalysisTool(),
                     MedicationsTool(),
                     FoodlogTool(),
+                    MealGlucoseImpactTool(),
+                    ActivityGlucoseImpactTool(),
+                    SleepGlucoseImpactTool(),
+                    StressGlucoseImpactTool(),
+                    LifestyleGlucoseImpactTool(),
                     ProtocolTool(),
                     PlanTool(),  # Allow patients to view their own plans
                     DoctorPatientMappingTool(),  # Allow patients to query their doctor details
@@ -749,6 +838,11 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     MedicationsTool(),
                     FoodlogTool(),
                     FoodlogUploadersTool(),  # Staff: aggregate 'who uploaded a food log on <date>' across their roster
+                    MealGlucoseImpactTool(),  # meal -> post-meal glucose correlation
+                    ActivityGlucoseImpactTool(),  # daily activity -> glucose dose-response
+                    SleepGlucoseImpactTool(),  # nightly sleep -> next-day glucose
+                    StressGlucoseImpactTool(),  # daily stress -> glucose (median split)
+                    LifestyleGlucoseImpactTool(),
                     ProtocolTool(),
                     PlanTool(),  # Staff can view any patient's plans
                     DoctorPatientMappingTool(),  # Staff can view all doctor-patient mappings
@@ -827,7 +921,8 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                 # produce a chart use this side-channel instead). Cleared after
                 # reading so a stale chart never leaks into a later unrelated answer.
                 chart_data = None
-                for tool in self.tools:
+                executor_tools = getattr(self.agent_executor, 'tools', None) or self.tools
+                for tool in executor_tools:
                     pending = getattr(tool, 'last_chart_data', None)
                     if pending is not None:
                         chart_data = pending

@@ -12,6 +12,8 @@ from typing import Optional
 from datetime import date, timedelta
 import httpx
 from langchain.tools import BaseTool
+from dal.postgres_db import resolve_range
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +43,11 @@ class AGPChartTool(BaseTool):
     Parameters:
     - patient_id (int): Patient ID (optional for patient role, required for staff queries)
     - patient_name (str): Patient name (alternative to patient_id for staff)
-    - from_date (str): Start date YYYY-MM-DD (default: 14 days before to_date)
-    - to_date (str): End date YYYY-MM-DD (default: today)
+    - from_date (str): Start date (YYYY-MM-DD, YYYY-MM, or YYYY) — OPTIONAL
+    - to_date (str): End date (YYYY-MM-DD, YYYY-MM, or YYYY) — OPTIONAL
+    - period (str): OPTIONAL relative phrase, e.g. 'last 30 days', 'July 2026', 'this month'.
+      AGP is always computed over a BOUNDED window; if the user names NO period the tool
+      uses a sensible default window — it does NOT span all history.
     - include_tir (bool): True if the user asked for Time in Range / TIR / a general overview.
     - include_agp (bool): True if the user asked for the AGP ribbon chart. Default true —
       set to FALSE only when the user asked for TIR specifically and did NOT mention AGP at all.
@@ -62,7 +67,8 @@ class AGPChartTool(BaseTool):
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
              from_date: Optional[str] = None, to_date: Optional[str] = None,
-             include_tir: bool = False, include_agp: bool = True) -> str:
+             include_tir: bool = False, include_agp: bool = True,
+             period: Optional[str] = None) -> str:
         user_context = getattr(self, 'user_context', None)
 
         if user_context and user_context.get('role_id') == 1:
@@ -113,10 +119,18 @@ class AGPChartTool(BaseTool):
         elif not patient_id:
             return json.dumps({"error": "patient_id or patient_name is required for staff queries"})
 
-        if not to_date:
+        # AGP is a clinical report defined over a BOUNDED window, so — unlike the
+        # trend/correlation tools — it never analyses "all history". If the user
+        # named a period, use it; otherwise fall back to the configured default
+        # window (AGP is undefined without one). DELIBERATE exception to the
+        # "no period -> all history" rule: do NOT change it to match the trend tools.
+        start, end, _ = resolve_range(from_date, to_date, period)
+        if start:
+            from_date, to_date = start, end
+        else:
             to_date = date.today().isoformat()
-        if not from_date:
-            from_date = (date.today() - timedelta(days=14)).isoformat()
+            from_date = (date.today()
+                         - timedelta(days=settings.AGP_DEFAULT_WINDOW_DAYS)).isoformat()
 
         token = user_context.get('token') if user_context else None
         if not token:
@@ -182,5 +196,6 @@ class AGPChartTool(BaseTool):
             logger.error(f"Error in AGPChartTool: {e}")
             return json.dumps({"error": f"Chart generation error: {str(e)}"})
 
-    async def _arun(self, patient_id=None, patient_name=None, from_date=None, to_date=None, include_tir=False, include_agp=True):
-        return self._run(patient_id, patient_name, from_date, to_date, include_tir, include_agp)
+    async def _arun(self, patient_id=None, patient_name=None, from_date=None, to_date=None,
+                    include_tir=False, include_agp=True, period=None):
+        return self._run(patient_id, patient_name, from_date, to_date, include_tir, include_agp, period)

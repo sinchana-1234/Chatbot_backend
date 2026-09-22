@@ -20,46 +20,60 @@ class FoodlogService(BaseService):
     
     def get_foodlog(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
                    date_filter: Optional[datetime] = None, limit: int = 10) -> Dict[str, Any]:
-        """Get food log records for a patient"""
+        """Get food log records for a patient.
+
+        Patient resolution stays on MySQL (the `users` table is MySQL-only), but the
+        foodlog rows are read from POSTGRES: public.foodlog is the source of truth and
+        is the only copy carrying actual_time / meal_type / analysis_data. Uses the same
+        SessionLocalPG the glucose tools use.
+        """
         try:
-            from ..models.foodlog import Foodlog
-            
-            # Find patient ID
+            from sqlalchemy import text
+            from dal.postgres_db import SessionLocalPG
+
+            # Resolve the patient on MySQL (users lives there)
             patient_id = self.find_patient_by_name_or_id(patient_id, patient_name)
             if not patient_id:
                 return {"error": "Patient not found"}
-            
-            # Get active foodlog records (status = 1)
-            query = self.db.query(Foodlog).filter(
-                Foodlog.patient_id == patient_id,
-                Foodlog.status == 1
+
+            sql = (
+                "SELECT id, type, url, activitydate, createdon, actual_time, "
+                "source_timezone, createdby, description, status, latitude, "
+                "longitude, analysis_data, meal_type "
+                "FROM foodlog "
+                "WHERE patient_id = :pid AND status = 1"
             )
-            
-            # Apply date filter if provided (on createdon)
+            params = {"pid": patient_id, "lim": limit}
             if date_filter:
-                query = query.filter(Foodlog.createdon >= date_filter)
-            
-            # Order by createdon descending and limit results
-            query = query.order_by(Foodlog.createdon.desc()).limit(limit)
-            foodlogs = query.all()
-            
-            # Convert to dict
+                sql += " AND actual_time >= :dfrom"
+                params["dfrom"] = date_filter
+            sql += " ORDER BY actual_time DESC NULLS LAST LIMIT :lim"
+
+            pg = SessionLocalPG()
+            try:
+                rows = pg.execute(text(sql), params).mappings().all()
+            finally:
+                pg.close()
+
             foodlog_list = []
-            for log in foodlogs:
-                log_dict = {
-                    "id": log.id,
-                    "type": log.type,
-                    "url": log.url,
-                    "activitydate": log.activitydate,
-                    "createdon": log.createdon.isoformat() if log.createdon is not None else None,
-                    "createdby": log.createdby,
-                    "description": log.description,
-                    "status": log.status,
-                    "latitude": log.latitude,
-                    "longitude": log.longitude
-                }
-                foodlog_list.append(log_dict)
-            
+            for r in rows:
+                foodlog_list.append({
+                    "id": r["id"],
+                    "type": r["type"],
+                    "url": r["url"],
+                    "activitydate": r["activitydate"],
+                    "createdon": r["createdon"].isoformat() if r["createdon"] is not None else None,
+                    "actual_time": r["actual_time"].isoformat() if r["actual_time"] is not None else None,
+                    "source_timezone": r["source_timezone"],
+                    "createdby": r["createdby"],
+                    "description": r["description"],
+                    "status": r["status"],
+                    "latitude": r["latitude"],
+                    "longitude": r["longitude"],
+                    "analysis_data": r["analysis_data"],
+                    "meal_type": r["meal_type"],
+                })
+
             return {
                 "patient_id": patient_id,
                 "foodlog": foodlog_list,
@@ -68,7 +82,7 @@ class FoodlogService(BaseService):
                 "date_filter": date_filter.isoformat() if date_filter else None,
                 "message": f"Showing top {len(foodlog_list)} latest foodlog records" + (f" from {date_filter.strftime('%Y-%m-%d')}" if date_filter else "")
             }
-            
+
         except Exception as e:
             logger.error(f"Error getting foodlog: {e}")
             return {"error": f"Database error: {str(e)}"}
@@ -76,131 +90,76 @@ class FoodlogService(BaseService):
     def get_foodlog_uploaders_by_date(self, date_filter: datetime,
                                        roster_patient_ids: Optional[List[int]] = None,
                                        include_items: bool = False) -> Dict[str, Any]:
-        """
-        Get every patient who uploaded at least one food log on a given date.
+        """Every patient who uploaded a food log on a given LOCAL date.
 
-        Args:
-            date_filter (datetime): The date to check (time portion is ignored;
-                the whole day, start to end, is checked).
-            roster_patient_ids (List[int], optional): Restrict results to this
-                set of patient IDs (e.g. a doctor's own patients). If None,
-                all patients in the system are considered.
-            include_items (bool): If True, also include each patient's actual
-                food log entries (description/url/time) for that date, not
-                just their name. Use when the question asks what was eaten,
-                not just who uploaded.
-
-        Returns:
-            dict: Resolved date, count, and list of uploaders. Each uploader
-                has "patient_name", and "items" (list of that patient's
-                entries) when include_items is True.
+        Foodlog rows come from POSTGRES; names are resolved from MySQL users afterwards
+        (the old single-query JOIN across Foodlog+Users is impossible once foodlog is in
+        a different database). Date is matched on actual_time (patient-local), matching
+        the local-time policy used everywhere else in the Postgres layer.
         """
         try:
-            from datetime import timedelta
-            from ..models.foodlog import Foodlog
+            from sqlalchemy import text
+            from dal.postgres_db import SessionLocalPG
             from ..models.users import Users
 
-            day_start = date_filter.replace(hour=0, minute=0, second=0, microsecond=0)
-            day_end = day_start + timedelta(days=1)
+            target = date_filter.strftime("%Y-%m-%d")
 
-            if not include_items:
-                # Lightweight path: just who uploaded, one row per patient
-                query = self.db.query(
-                    Foodlog.patient_id,
-                    Users.first_name,
-                    Users.last_name
-                ).join(
-                    Users, Foodlog.patient_id == Users.id
-                ).filter(
-                    Foodlog.status == 1,
-                    Foodlog.createdon >= day_start,
-                    Foodlog.createdon < day_end
-                )
+            if roster_patient_ids is not None and not roster_patient_ids:
+                return {"date": target, "count": 0, "uploaders": [],
+                        "message": f"No patients in scope to check for {target}."}
 
-                if roster_patient_ids is not None:
-                    if not roster_patient_ids:
-                        return {
-                            "date": day_start.strftime("%Y-%m-%d"),
-                            "count": 0,
-                            "uploaders": [],
-                            "message": f"No patients in scope to check for {day_start.strftime('%Y-%m-%d')}."
-                        }
-                    query = query.filter(Foodlog.patient_id.in_(roster_patient_ids))
-
-                # DISTINCT on patient_id so multiple uploads by the same patient
-                # on the same day only count once. Grouping by all three selected
-                # columns (rather than dialect-specific DISTINCT ON) keeps this
-                # portable across MySQL and Postgres.
-                results = query.group_by(
-                    Foodlog.patient_id, Users.first_name, Users.last_name
-                ).all()
-
-                uploaders = []
-                for patient_id, first_name, last_name in results:
-                    full_name = f"{first_name or ''} {last_name or ''}".strip() or f"Patient {patient_id}"
-                    uploaders.append({"patient_name": full_name})
-
-                uploaders.sort(key=lambda u: u["patient_name"].lower())
-
-                date_str = day_start.strftime("%Y-%m-%d")
-                return {
-                    "date": date_str,
-                    "count": len(uploaders),
-                    "uploaders": uploaders,
-                    "message": f"{len(uploaders)} patient(s) uploaded a food log on {date_str}."
-                }
-
-            # include_items path: fetch every matching row (not collapsed),
-            # then group each patient's entries together in Python
-            query = self.db.query(
-                Foodlog.patient_id,
-                Users.first_name,
-                Users.last_name,
-                Foodlog.description,
-                Foodlog.url,
-                Foodlog.type,
-                Foodlog.createdon
-            ).join(
-                Users, Foodlog.patient_id == Users.id
-            ).filter(
-                Foodlog.status == 1,
-                Foodlog.createdon >= day_start,
-                Foodlog.createdon < day_end
-            )
-
+            where = ["status = 1", "actual_time IS NOT NULL", "DATE(actual_time) = :target"]
+            params = {"target": target}
             if roster_patient_ids is not None:
-                if not roster_patient_ids:
-                    return {
-                        "date": day_start.strftime("%Y-%m-%d"),
-                        "count": 0,
-                        "uploaders": [],
-                        "message": f"No patients in scope to check for {day_start.strftime('%Y-%m-%d')}."
-                    }
-                query = query.filter(Foodlog.patient_id.in_(roster_patient_ids))
+                where.append("patient_id = ANY(:roster)")
+                params["roster"] = roster_patient_ids
+            where_sql = " AND ".join(where)
 
-            rows = query.order_by(Foodlog.patient_id, Foodlog.createdon.asc()).all()
+            pg = SessionLocalPG()
+            try:
+                if not include_items:
+                    rows = pg.execute(text(
+                        f"SELECT DISTINCT patient_id FROM foodlog WHERE {where_sql}"
+                    ), params).mappings().all()
+                    pid_order = [r["patient_id"] for r in rows]
+                    items_by_pid = {}
+                else:
+                    rows = pg.execute(text(
+                        f"SELECT patient_id, description, url, type, meal_type, actual_time "
+                        f"FROM foodlog WHERE {where_sql} ORDER BY patient_id, actual_time ASC"
+                    ), params).mappings().all()
+                    items_by_pid, pid_order = {}, []
+                    for r in rows:
+                        pid = r["patient_id"]
+                        if pid not in items_by_pid:
+                            items_by_pid[pid] = []
+                            pid_order.append(pid)
+                        items_by_pid[pid].append({
+                            "time": r["actual_time"].strftime("%I:%M %p") if r["actual_time"] else None,
+                            "description": r["description"], "url": r["url"],
+                            "type": r["type"], "meal_type": r["meal_type"],
+                        })
+            finally:
+                pg.close()
 
-            patients_by_id: Dict[int, Dict[str, Any]] = {}
-            for patient_id, first_name, last_name, description, url, log_type, createdon in rows:
-                if patient_id not in patients_by_id:
-                    full_name = f"{first_name or ''} {last_name or ''}".strip() or f"Patient {patient_id}"
-                    patients_by_id[patient_id] = {"patient_name": full_name, "items": []}
-                patients_by_id[patient_id]["items"].append({
-                    "time": createdon.strftime("%I:%M %p") if createdon else None,
-                    "description": description,
-                    "url": url,
-                    "type": log_type
-                })
+            if not pid_order:
+                return {"date": target, "count": 0, "uploaders": [],
+                        "message": f"No patients uploaded a food log on {target}."}
 
-            uploaders = sorted(patients_by_id.values(), key=lambda u: u["patient_name"].lower())
+            # Resolve names on MySQL for just these patient IDs
+            users = self.db.query(Users).filter(Users.id.in_(pid_order)).all()
+            name_by_id = {u.id: (f"{u.first_name or ''} {u.last_name or ''}".strip()) for u in users}
 
-            date_str = day_start.strftime("%Y-%m-%d")
-            return {
-                "date": date_str,
-                "count": len(uploaders),
-                "uploaders": uploaders,
-                "message": f"{len(uploaders)} patient(s) uploaded a food log on {date_str}."
-            }
+            uploaders = []
+            for pid in pid_order:
+                entry = {"patient_name": name_by_id.get(pid) or f"Patient {pid}"}
+                if include_items:
+                    entry["items"] = items_by_pid.get(pid, [])
+                uploaders.append(entry)
+            uploaders.sort(key=lambda u: u["patient_name"].lower())
+
+            return {"date": target, "count": len(uploaders), "uploaders": uploaders,
+                    "message": f"{len(uploaders)} patient(s) uploaded a food log on {target}."}
 
         except Exception as e:
             logger.error(f"Error getting foodlog uploaders by date: {e}")

@@ -35,6 +35,8 @@ from typing import Optional
 import httpx
 from langchain.tools import BaseTool
 from dal.database import DatabaseManager
+from dal.postgres_db import resolve_range
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,55 @@ if not HEALTH_PROGRESS_BASE:
     raise RuntimeError(
         "HEALTH_PROGRESS_BASE_URL is not set in .env — HealthProgressTool cannot function without it."
     )
+
+
+def _format_glucose_trend_prose(summary: dict, from_date: str, to_date: str,
+                                is_fallback: bool = False) -> str:
+    """Build the glucose-trend answer as a finished bulleted summary, delivered to
+    the user verbatim (chat_routes returns it directly, bypassing the LLM's
+    formatting). Every number comes straight from glucoseDailyAnalytics fields
+    (meanGlucose / minGlucose / maxGlucose / tirPercent / tarPercent / tbrPercent /
+    glycemicVariabilityCv) -- nothing is invented or re-derived by the model."""
+    # Human-friendly range, e.g. "August 26 to September 1, 2026". Uses .day/.year
+    # ints rather than %-d/%#d so it is cross-platform (Windows-safe).
+    try:
+        d1 = datetime.strptime(from_date, "%Y-%m-%d")
+        d2 = datetime.strptime(to_date, "%Y-%m-%d")
+        if d1.year == d2.year:
+            date_range = f"{d1.strftime('%B')} {d1.day} to {d2.strftime('%B')} {d2.day}, {d2.year}"
+        else:
+            date_range = f"{d1.strftime('%B')} {d1.day}, {d1.year} to {d2.strftime('%B')} {d2.day}, {d2.year}"
+    except (ValueError, TypeError):
+        date_range = f"{from_date} to {to_date}"
+
+    avg = summary.get("avg_glucose")
+    lo  = summary.get("min_glucose")
+    hi  = summary.get("max_glucose")
+    tir = summary.get("avg_tir_pct")
+    tar = summary.get("avg_tar_pct")
+    tbr = summary.get("avg_tbr_pct")
+    cv  = summary.get("avg_cv_pct")
+
+    if is_fallback:
+        header = ("No recent glucose data is available. Here are the most recent "
+                  f"available glucose trends from {date_range}:")
+    else:
+        header = f"Here are the glucose trends from {date_range}:"
+
+    lines = [f"* **Average glucose:** {avg} mg/dL"]
+    if lo is not None and hi is not None:
+        # \u2013 is an en dash (kept as an escape so the source stays ASCII).
+        lines.append(f"* **Glucose range:** {lo}\u2013{hi} mg/dL")
+    if tir is not None:
+        lines.append(f"* **Time in Range (TIR):** {tir}%")
+    if tbr is not None:
+        lines.append(f"* **Below range:** {tbr}%")
+    if tar is not None:
+        lines.append(f"* **Above range:** {tar}%")
+    if cv is not None:
+        lines.append(f"* **Glucose variability (CV):** {cv}%")
+
+    return header + "\n\n" + "\n".join(lines)
 
 
 class HealthProgressBase(BaseTool):
@@ -272,6 +323,27 @@ class HealthProgressBase(BaseTool):
         return chart_data
 
     def _summarize(self, metric: str, glucose_daily: list, data: dict) -> dict:
+        if metric == "glucose":
+            valid = [d for d in glucose_daily if d.get("meanGlucose") is not None]
+            if not valid:
+                return {"days_count": 0}
+            means = [d["meanGlucose"] for d in valid]
+            mins  = [d["minGlucose"] for d in valid if d.get("minGlucose") is not None]
+            maxs  = [d["maxGlucose"] for d in valid if d.get("maxGlucose") is not None]
+            tirs  = [d["tirPercent"] for d in valid if d.get("tirPercent") is not None]
+            tars  = [d["tarPercent"] for d in valid if d.get("tarPercent") is not None]
+            tbrs  = [d["tbrPercent"] for d in valid if d.get("tbrPercent") is not None]
+            cvs   = [d["glycemicVariabilityCv"] for d in valid if d.get("glycemicVariabilityCv") is not None]
+            return {
+                "days_count": len(valid),
+                "avg_glucose": round(sum(means) / len(means)),
+                "min_glucose": round(min(mins)) if mins else None,
+                "max_glucose": round(max(maxs)) if maxs else None,
+                "avg_tir_pct": round(sum(tirs) / len(tirs), 1) if tirs else None,
+                "avg_tar_pct": round(sum(tars) / len(tars), 1) if tars else None,
+                "avg_tbr_pct": round(sum(tbrs) / len(tbrs), 1) if tbrs else None,
+                "avg_cv_pct": round(sum(cvs) / len(cvs), 1) if cvs else None,
+            }
         if metric == "hba1c":
             valid = [d for d in glucose_daily if d.get("estimatedHba1c") is not None]
             if not valid:
@@ -384,16 +456,26 @@ class HealthProgressBase(BaseTool):
 
     def _run_for_metric(self, metric: str, patient_id: Optional[int] = None,
                          patient_name: Optional[str] = None,
-                         from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+                         from_date: Optional[str] = None, to_date: Optional[str] = None,
+                         period: Optional[str] = None) -> str:
         patient_id, resolution_error = self._resolve_patient_id(patient_id, patient_name)
         if resolution_error:
             object.__setattr__(self, 'last_chart_data', None)
             return resolution_error
 
-        if not to_date:
+        # Resolve whatever the caller gave (explicit dates, a month/year, or a
+        # relative phrase) to a concrete window. NO hidden 7-day default: when
+        # nothing is specified we analyse ALL available history. The API is a
+        # /{from}/{to} path (it can't take "unbounded"), so all-history is a wide
+        # floor window; the response still states the actual dates covered.
+        start, end, period_label = resolve_range(from_date, to_date, period)
+        if start:
+            from_date, to_date = start, end
+        else:
             to_date = datetime.now().strftime("%Y-%m-%d")
-        if not from_date:
-            from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            from_date = (datetime.now()
+                         - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)
+                         ).strftime("%Y-%m-%d")
 
         user_context = getattr(self, 'user_context', None)
         auth_token = (user_context.get('auth_token') or user_context.get('token')) if user_context else None
@@ -412,40 +494,9 @@ class HealthProgressBase(BaseTool):
         glucose_daily = data.get("glucoseDailyAnalytics") or []
         status = "ok"
         notice = None
-        requested_from, requested_to = from_date, to_date
-
-        if not glucose_daily:
-            fallback_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
-            try:
-                probe_data = self._fetch(patient_id, fallback_from, to_date, auth_token)
-            except Exception:
-                probe_data = {}
-            probe_glucose = probe_data.get("glucoseDailyAnalytics") or []
-            if not probe_glucose:
-                status = "no_data_at_all"
-                notice = f"No data was found for patient {patient_id} in the last 180 days."
-                object.__setattr__(self, 'last_chart_data', None)
-                return json.dumps({"patient_id": patient_id, "status": status, "notice": notice})
-
-            most_recent_date = max(d["glucoseDate"] for d in probe_glucose)
-            window_end_dt = datetime.strptime(most_recent_date, "%Y-%m-%d")
-            window_start_dt = window_end_dt - timedelta(days=6)
-            actual_from = window_start_dt.strftime("%Y-%m-%d")
-            actual_to = window_end_dt.strftime("%Y-%m-%d")
-
-            try:
-                data = self._fetch(patient_id, actual_from, actual_to, auth_token)
-            except Exception:
-                data = probe_data
-
-            glucose_daily = data.get("glucoseDailyAnalytics") or []
-            status = "fallback_most_recent"
-            notice = (
-                f"No data was found for the requested range ({requested_from} to "
-                f"{requested_to}). Showing the most recent available data instead: "
-                f"{actual_from} to {actual_to}."
-            )
-            from_date, to_date = actual_from, actual_to
+        # The old 180-day "most recent" fallback was removed here (rule 11: never
+        # silently substitute a different period). An empty window is now reported
+        # honestly by the metric branch below.
 
         program_summary = {}
         raw_program = data.get("patientProgramDetails")
@@ -468,9 +519,12 @@ class HealthProgressBase(BaseTool):
 
         metric_notice = None
         chart_data = None
+        user_context = getattr(self, 'user_context', None)
         if len(glucose_daily) > 1:
             chart_data = self._build_chart(metric, glucose_daily, data, from_date, to_date)
             object.__setattr__(self, 'last_chart_data', chart_data)
+            if user_context is not None and chart_data is not None:
+                user_context['_last_trend_chart_data'] = chart_data
             if chart_data is None and metric != "glucose":
                 metric_notice = (
                     f"No {metric} data was recorded for patient {patient_id} "
@@ -538,6 +592,24 @@ class HealthProgressBase(BaseTool):
             else:
                 base_payload["stress"] = (data.get("stress") or [])[:RAW_FALLBACK_CAP]
                 base_payload["hrv"] = (data.get("hrv") or [])[:RAW_FALLBACK_CAP]
+        elif metric == "glucose":
+            summary = self._summarize("glucose", glucose_daily, data)
+            if summary.get("days_count", 0) == 0:
+                where = period_label if start else "this patient's available history"
+                msg = f"No glucose data available for {where}."
+                if user_context is not None:
+                    user_context['_last_glucose_trend_text'] = msg
+                return msg
+            glucose_prose = _format_glucose_trend_prose(
+                summary, from_date, to_date,
+                is_fallback=(status != "ok"),
+            )
+            # Deliver verbatim, bypassing the LLM's formatting entirely (same
+            # side-channel AGP/eHbA1c use). chat_routes returns this text directly
+            # as the response, so the model cannot re-bullet it.
+            if user_context is not None:
+                user_context['_last_glucose_trend_text'] = glucose_prose
+            return glucose_prose
         else:
             base_payload.update({
                 "glucose_daily": glucose_daily[:RAW_FALLBACK_CAP],
@@ -559,19 +631,19 @@ _COMMON_TAIL = (
     "the user gave you; do NOT guess a patient_id when only a name was given, "
     "this tool resolves the name itself. If multiple patients match the name, "
     "relay the returned list and ask the user which one — do not choose "
-    "yourself. from_date/to_date (YYYY-MM-DD) are OPTIONAL — if omitted, "
-    "defaults to the last 7 days. The result includes a 'status' field: 'ok', "
-    "'ambiguous_name', 'not_found', 'fallback_most_recent' (no data in the "
-    "requested range — showing the most recent available data instead, always "
-    "state the ACTUAL date range shown, not the one requested), or "
-    "'no_data_at_all' (nothing found in the last 180 days). Always relay the "
-    "'notice' field verbatim when present. A chart is ALREADY shown "
+    "yourself. from_date/to_date (YYYY-MM-DD, or YYYY-MM / YYYY) are OPTIONAL, "
+    "as is a 'period' phrase (e.g. 'last 30 days', 'July 2026', 'this month'); "
+    "pass whichever the user gave. If the user names NO period at all, omit all "
+    "three — the tool then analyses the patient's FULL available history; do NOT "
+    "invent a default window. The result includes a 'status' field: 'ok', "
+    "'ambiguous_name', 'not_found', or 'no_data' (no data for the requested "
+    "period — the tool does NOT silently substitute another period). Always "
+    "relay the 'notice' field verbatim when present. A chart is ALREADY shown "
     "automatically when data is found — do NOT write out a table or list of "
-    "daily values yourself; give only a brief 1-3 sentence summary. The "
-    "summary includes WHICH DATE had the highest/lowest/best/worst value — "
-    "if the user asks a follow-up like 'which day was it' or 'when did that "
-    "happen', answer directly from the dated fields already in this result, "
-    "do not call the tool again."
+    "daily values yourself; give only a brief 1-3 sentence summary. The summary "
+    "includes WHICH DATE had the highest/lowest/best/worst value — if the user "
+    "asks a follow-up like 'which day was it', answer directly from the dated "
+    "fields already in this result, do not call the tool again."
 )
 
 
@@ -586,8 +658,9 @@ class GlucoseTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("glucose", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("glucose", patient_id, patient_name, from_date, to_date, period)
 
 
 class TIRTrendTool(HealthProgressBase):

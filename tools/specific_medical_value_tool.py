@@ -14,6 +14,92 @@ from dal.postgres_db import SessionLocalPG
 
 logger = logging.getLogger(__name__)
 
+# --- Deterministic formatter for pattern_high / pattern_low answers ------------
+# Built in Python and delivered verbatim (same bypass the glucose-trend tool uses)
+# so the model can't re-bullet or reword it. The band map below is the one tunable
+# knob for the descriptive sentences.
+_PATTERN_BANDS = [
+    (range(0, 5),   "overnight"),
+    (range(5, 9),   "early morning"),
+    (range(9, 12),  "late morning"),
+    (range(12, 17), "afternoon"),
+    (range(17, 20), "evening"),
+    (range(20, 24), "late evening"),
+]
+_READING_LABEL = {
+    "glucose": "glucose",
+    "blood_pressure": "blood pressure",
+    "spo2": "SpO2",
+    "heart_rate": "heart rate",
+}
+
+def _pattern_band_of(h):
+    for rng, lbl in _PATTERN_BANDS:
+        if h in rng:
+            return lbl
+    return "other"
+
+def _pattern_h12(h):
+    return f"{12 if h % 12 == 0 else h % 12} {'AM' if h < 12 else 'PM'}"
+
+def _pattern_hour_range(h):
+    return f"{_pattern_h12(h)}\u2013{_pattern_h12((h + 1) % 24)}"
+
+def _pattern_join(items):
+    items = list(dict.fromkeys(items))
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+def _pattern_top_bands(bands_seen, n):
+    counts, order = {}, []
+    for b in bands_seen:
+        if b not in counts:
+            counts[b] = 0
+            order.append(b)
+        counts[b] += 1
+    order.sort(key=lambda b: -counts[b])  # stable: ties keep first-seen order
+    return order[:n]
+
+def _format_pattern_prose(patient_name, reading_type, analysis_type, hourly_pattern):
+    is_high = analysis_type == "pattern_high"
+    adj = "elevated" if is_high else "low"
+    Adj = "Elevated" if is_high else "Low"
+    label = _READING_LABEL.get(reading_type, reading_type.replace("_", " "))
+    name = patient_name or "This patient"
+
+    # Clinical-safety rule enforced in CODE (was a prompt instruction): only call
+    # an hour a recurring PATTERN if it recurs on 2+ distinct days.
+    recurring = sorted(
+        (e for e in hourly_pattern if e.get("distinct_days", 0) >= 2),
+        key=lambda e: e.get("distinct_days", 0),
+        reverse=True,
+    )
+    if not recurring:
+        prep = "above" if is_high else "below"
+        return (f"{name}'s {label} readings {prep} the threshold look like "
+                f"isolated single-day episodes, not a recurring time-of-day pattern.")
+    top = recurring[:5]
+
+    lead_bands = _pattern_top_bands([_pattern_band_of(e["hour_of_day"]) for e in top], 2)
+    lead = (f"{name}'s {label} levels are most frequently {adj} during the "
+            f"{_pattern_join(lead_bands)} hours.")
+
+    bullets = [
+        f"* **{_pattern_hour_range(e['hour_of_day'])}** \u2014 {Adj} on {e['distinct_days']} days"
+        for e in top
+    ]
+
+    h0 = top[0]["hour_of_day"]
+    peak = "around midnight" if h0 in (23, 0, 1) else f"in the {_pattern_band_of(h0)} hours"
+    rest = [_pattern_band_of(e["hour_of_day"]) for e in top[1:]
+            if _pattern_band_of(e["hour_of_day"]) != _pattern_band_of(h0)]
+    overall = (f"Overall pattern: {Adj} {label} occurs most frequently {peak}"
+               + (f" and during the {_pattern_join(rest)} hours." if rest else "."))
+
+    return lead + "\nThe main periods are:\n\n" + "\n".join(bullets) + "\n\n" + overall
 
 class SpecificMedicalValueTool(BaseTool):
     name: str = "get_specific_medical_value"
@@ -406,22 +492,24 @@ class SpecificMedicalValueTool(BaseTool):
                         for hr, b in sorted(buckets.items(), key=lambda kv: -kv[1]["count"])
                     ]
 
-                    return json.dumps({
-                        "type": analysis_type,
-                        "reading_type": reading_type,
-                        "threshold": effective_threshold,
-                        "total_matching_readings": len(rows),
-                        "total_distinct_days_with_data": len(all_days),
-                        "hourly_pattern": hourly_pattern,
-                        "interpretation_note": (
-                            "Only describe a genuine time-of-day PATTERN for hours where "
-                            "distinct_days is 2 or more (that hour showed extreme readings on "
-                            "multiple different days). An hour with distinct_days=1 means every "
-                            "matching reading in that bucket came from a single day/night — "
-                            "report that as an ISOLATED EPISODE on that specific date, never as "
-                            "a recurring daily pattern."
-                        )
-                    }, indent=2)
+                    # Build the answer deterministically and deliver it verbatim
+                    # (bypass), so the model can't re-bullet or reword it.
+                    patient_display_name = None
+                    try:
+                        from dal.database import DatabaseManager
+                        with DatabaseManager() as _dm:
+                            _u = _dm.get_users(user_id=patient_id)
+                            if _u:
+                                patient_display_name = f"{_u[0].first_name or ''} {_u[0].last_name or ''}".strip() or None
+                    except Exception:
+                        patient_display_name = None
+
+                    pattern_text = _format_pattern_prose(
+                        patient_display_name, reading_type, analysis_type, hourly_pattern
+                    )
+                    if user_context is not None:
+                        user_context['_last_pattern_text'] = pattern_text
+                    return pattern_text
 
                 # -------------------------
                 # ANALYSIS TYPE (specific / highest / lowest — unchanged legacy behavior)

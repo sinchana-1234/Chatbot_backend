@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, validator
 # Keep your original import path; the agent class name is the same.
 from agents import MedicalLangChainAgent
 from auth.auth import get_current_user, UserContext, get_authorized_patient_id
+from response_builder import resolve_agent_output
  
 logger = logging.getLogger(__name__)
  
@@ -321,25 +322,24 @@ async def handle_query(
             result = await session_agent.chat(query_with_context)
             logger.info(f"✅ Medical agent response generated successfully for user {current_user.user_id}")
 
-            # Pick up any chart data the tools generated this turn, without
-            # ever routing it through the LLM's own reasoning.
-            agp_chart_data = None
-            ehba1c_tir_data = None
-            if hasattr(session_agent, 'user_context') and session_agent.user_context:
-                agp_chart_data = session_agent.user_context.pop('_last_agp_chart_data', None)
-                ehba1c_tir_data = session_agent.user_context.pop('_last_ehba1c_tir_data', None)
- 
+            # One helper turns the agent turn into (text, charts). It reads
+            # every deterministic-tool answer by convention and never drifts
+            # between /query and /voice. See response_builder.resolve_agent_output.
+            response_text, chart_data, agp_chart_data, ehba1c_tir_data = resolve_agent_output(
+                getattr(session_agent, "user_context", None), result
+            )
+
             result_metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
             result_metadata["session_id"] = session_id
             result_metadata["conversation_length"] = len(session_agent.get_conversation_history() or [])
             result_metadata["user_role"] = current_user.role_name
             result_metadata["authorized_patient_id"] = authorized_patient_id
- 
+
             return QueryResponse(
-                response=result.get("message", "") if isinstance(result, dict) else str(result),
+                response=response_text,
                 sessionId=session_id,
                 metadata=result_metadata,
-                chart_data=result.get("chart_data") if isinstance(result, dict) else None,
+                chart_data=chart_data,
                 agpChartData=agp_chart_data,
                 ehba1cTirData=ehba1c_tir_data,
                 user_context={
@@ -363,7 +363,8 @@ async def handle_query(
 @router.post("/voice", response_model=VoiceQueryResponse)
 async def handle_voice_query(
     request: VoiceQueryRequest,
-    current_user: UserContext = Depends(get_current_user)
+    current_user: UserContext = Depends(get_current_user),
+    authorization: Optional[str] = Header(default=None)
 ):
     """
     Voice:
@@ -424,14 +425,13 @@ async def handle_voice_query(
         # 6) Ask the agent
         result = await session_agent.chat(query_with_context)
 
-        # Pick up any chart data the tools generated this turn
-        agp_chart_data = None
-        ehba1c_tir_data = None
-        if hasattr(session_agent, 'user_context') and session_agent.user_context:
-            agp_chart_data = session_agent.user_context.pop('_last_agp_chart_data', None)
-            ehba1c_tir_data = session_agent.user_context.pop('_last_ehba1c_tir_data', None)
+        # Same single helper as /query -- identical response semantics, no drift.
+        response_text, chart_data, agp_chart_data, ehba1c_tir_data = resolve_agent_output(
+            getattr(session_agent, "user_context", None), result
+        )
+
         logger.info(f"✅ Voice query processed for user {current_user.user_id}")
- 
+
         # 7) Metadata
         result_metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
         result_metadata.update({
@@ -442,12 +442,12 @@ async def handle_voice_query(
             "language_mode": language,
             "transcript_length": len(transcript),
         })
- 
+
         return VoiceQueryResponse(
-            response=result.get("message", "") if isinstance(result, dict) else str(result),
+            response=response_text,
             sessionId=session_id,
             metadata=result_metadata,
-            chart_data=result.get("chart_data") if isinstance(result, dict) else None,
+            chart_data=chart_data,
             agpChartData=agp_chart_data,
             ehba1cTirData=ehba1c_tir_data,
             user_context={

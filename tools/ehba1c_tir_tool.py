@@ -12,6 +12,8 @@ from typing import Optional
 from datetime import date, timedelta
 import httpx
 from langchain.tools import BaseTool
+from dal.postgres_db import resolve_range
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +33,11 @@ class EHbA1cTIRTool(BaseTool):
     Parameters:
     - patient_id (int): Patient ID (optional for patient role, required for staff queries)
     - patient_name (str): Patient name (alternative to patient_id for staff)
-    - from_date (str): Start date YYYY-MM-DD (default: 14 days before to_date)
-    - to_date (str): End date YYYY-MM-DD (default: today)
+    - from_date (str): Start date (YYYY-MM-DD, YYYY-MM, or YYYY) — OPTIONAL
+    - to_date (str): End date (YYYY-MM-DD, YYYY-MM, or YYYY) — OPTIONAL
+    - period (str): OPTIONAL relative phrase, e.g. 'last 30 days', 'July 2026', 'this month'.
+      If the user names NO period, omit from_date/to_date/period and the tool covers the
+      patient's FULL available history — do NOT invent a default window.
     - specific_date (str): YYYY-MM-DD — set this if the user mentions a specific date, so
       the tool can find and report the 5-day period covering that date, instead of only
       the overall first-day-vs-last-day summary.
@@ -52,7 +57,7 @@ class EHbA1cTIRTool(BaseTool):
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
              from_date: Optional[str] = None, to_date: Optional[str] = None,
-             specific_date: Optional[str] = None) -> str:
+             specific_date: Optional[str] = None, period: Optional[str] = None) -> str:
         user_context = getattr(self, 'user_context', None)
 
         if user_context and user_context.get('role_id') == 1:
@@ -99,10 +104,19 @@ class EHbA1cTIRTool(BaseTool):
         elif not patient_id:
             return json.dumps({"error": "patient_id or patient_name is required for staff queries"})
 
-        if not to_date:
+        # Resolve the requested window. NO hidden 14-day default: nothing given →
+        # all available history. The API is still called with concrete dates (it's
+        # a from/to endpoint), but it returns the FULL device history regardless,
+        # so the requested range is actually enforced by filtering the returned
+        # 5-day periods below.
+        start, end, period_label = resolve_range(from_date, to_date, period)
+        range_requested = bool(start)
+        if range_requested:
+            from_date, to_date = start, end
+        else:
             to_date = date.today().isoformat()
-        if not from_date:
-            from_date = (date.today() - timedelta(days=14)).isoformat()
+            from_date = (date.today()
+                         - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)).isoformat()
 
         token = user_context.get('token') if user_context else None
         if not token:
@@ -128,15 +142,34 @@ class EHbA1cTIRTool(BaseTool):
                 return json.dumps({"error": f"eHbA1c/TIR data unavailable: {data.get('statusMessage', 'unknown error')}"})
 
             content = data.get("content", {})
-            summary = content.get("summary", [])       # first day vs last day
-            periods = content.get("periods", [])        # 5-day periods
+            summary = content.get("summary", [])       # first day vs last day (FULL device history)
+            periods = content.get("periods", [])        # 5-day periods (FULL device history)
             device_cycles = content.get("deviceCycle", [])  # full CGM sensor cycles
 
+            # The API ignores from_date/to_date and returns the full history, so
+            # enforce the requested window HERE: keep only the 5-day periods that
+            # overlap it. When no period was requested (all history), keep all.
+            if range_requested:
+                periods = [
+                    p for p in periods
+                    if p.get("periodStart") and p.get("periodEnd")
+                    and p["periodStart"] <= to_date and p["periodEnd"] >= from_date
+                ]
+
+            # Rule 11: report an empty window honestly, never silently widen it.
+            if range_requested and not periods:
+                return json.dumps({"message": f"No eHbA1c/TIR data available for {period_label}."})
             if not summary and not periods:
-                return json.dumps({"message": f"No eHbA1c/TIR trend data found for patient {patient_id} in this date range."})
+                return json.dumps({"message": "No eHbA1c/TIR data available for this patient's available history."})
 
             first_day = next((s for s in summary if s.get("dayType") == "DAY_1"), None)
             last_day = next((s for s in summary if s.get("dayType") == "LAST_DAY"), None)
+            # summary's DAY_1 / LAST_DAY are whole-device-history endpoints. When a
+            # specific range was asked for, they are NOT this range's endpoints, so
+            # don't present them as such — the filtered periods carry the window.
+            if range_requested:
+                first_day = None
+                last_day = None
 
             # If the user asked about a specific date, find the 5-day period
             # that contains it — this is the finest granularity the API offers
@@ -161,16 +194,19 @@ class EHbA1cTIRTool(BaseTool):
                     "last_day": last_day,
                 }
 
+            scope = period_label if range_requested else "all available data"
             if specific_date and not matched_period:
                 message = (f"No period found covering {specific_date}; "
-                           f"showing the overall first/last day trend instead.")
+                           f"showing the {scope} trend instead.")
             elif matched_period:
                 message = f"Data for the period covering {specific_date} is included below."
             else:
-                message = "eHbA1c/TIR trend data retrieved. A trend chart has been attached separately for display."
+                message = (f"eHbA1c/TIR trend for {scope} retrieved. "
+                           f"A trend chart has been attached separately for display.")
 
             return json.dumps({
                 "patient_id": patient_id,
+                "analyzed_period": scope,
                 "first_day": first_day,
                 "last_day": last_day,
                 "requested_date": specific_date,
@@ -187,5 +223,6 @@ class EHbA1cTIRTool(BaseTool):
             logger.error(f"Error in EHbA1cTIRTool: {e}")
             return json.dumps({"error": f"eHbA1c/TIR trend error: {str(e)}"})
 
-    async def _arun(self, patient_id=None, patient_name=None, from_date=None, to_date=None, specific_date=None):
-        return self._run(patient_id, patient_name, from_date, to_date, specific_date)
+    async def _arun(self, patient_id=None, patient_name=None, from_date=None, to_date=None,
+                    specific_date=None, period=None):
+        return self._run(patient_id, patient_name, from_date, to_date, specific_date, period)
