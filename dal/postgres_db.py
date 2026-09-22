@@ -174,6 +174,8 @@ def resolve_range(from_date=None, to_date=None, period=None, today=None):
             start, end = a[0], b[1]
         elif from_date and a:
             start, end = a
+            if start == end:            # a lone single DAY = "from that day onward"
+                end = today             # (a 1-day trend is never intended)
         elif to_date and b:
             start, end = b
         else:

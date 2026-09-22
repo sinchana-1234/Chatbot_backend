@@ -101,6 +101,25 @@ def _format_pattern_prose(patient_name, reading_type, analysis_type, hourly_patt
 
     return lead + "\nThe main periods are:\n\n" + "\n".join(bullets) + "\n\n" + overall
 
+def _friendly_dt(ts):
+    """Render a reading timestamp for humans:
+    '2026-07-13 00:00:00' -> 'July 13, 2026 at 12:00 AM'.
+    Midnight becomes '12:00 AM', not the raw '00:00:00' the model was
+    echoing. Windows-safe (avoids %-d / %-I, which crash on Windows)."""
+    if ts is None:
+        return None
+    if not isinstance(ts, datetime):
+        try:
+            ts = datetime.fromisoformat(str(ts))
+        except Exception:
+            return str(ts)
+    hour = ts.hour
+    suffix = "AM" if hour < 12 else "PM"
+    hour12 = 12 if hour % 12 == 0 else hour % 12
+    clock = f"{hour12}:{ts.minute:02d} {suffix}"
+    return ts.strftime("%B ") + str(ts.day) + f", {ts.year} at {clock}"
+
+
 class SpecificMedicalValueTool(BaseTool):
     name: str = "get_specific_medical_value"
     description: str = (
@@ -124,10 +143,11 @@ class SpecificMedicalValueTool(BaseTool):
         "happen'. "
         "An optional threshold parameter overrides the default cutoff for pattern_high/"
         "pattern_low. "
-        "DO NOT use this for multi-day trend CHARTS — use get_health_progress instead "
+        "DO NOT use this for multi-day trend CHARTS — use the get_*_trend tools instead "
+        "(get_glucose_trend, get_tir_trend, get_sleep_trend, get_activity_trend, etc.) "
         "for those (e.g. 'sleep quality this week', 'sleep trend', 'activity over the "
         "last N days', 'time in range chart'). If the user explicitly wants a chart, "
-        "prefer get_health_progress; if they want a plain-language status/pattern answer "
+        "prefer the matching get_*_trend tool; if they want a plain-language status/pattern answer "
         "with no chart, use this tool's overview/pattern_high/pattern_low modes."
     )
 
@@ -512,7 +532,83 @@ class SpecificMedicalValueTool(BaseTool):
                     return pattern_text
 
                 # -------------------------
-                # ANALYSIS TYPE (specific / highest / lowest — unchanged legacy behavior)
+                # SPECIFIC TIME — nearest reading to the requested time across ALL
+                # readings, NOT a value-ranked slice. (The old path did
+                # ORDER BY {value} DESC LIMIT 10 then picked the nearest-in-time among
+                # those 10, so the true reading at the asked time was missed whenever it
+                # wasn't one of the day's 10 highest — e.g. "10 AM" returned a 250 spike
+                # instead of the real 80. Fixed: order by absolute time distance, LIMIT 1.)
+                # -------------------------
+                if analysis_type == "specific" and specific_time:
+                    try:
+                        target_dt = datetime.fromisoformat(specific_time)
+                    except Exception:
+                        target_dt = None
+                    if target_dt is not None:
+                        near = db.execute(
+                            text(f"""
+                                SELECT {column}, {time_col}
+                                FROM {table}
+                                WHERE patient_id = :patient_id
+                                AND {date_condition}
+                                AND {time_condition}
+                                ORDER BY ABS(EXTRACT(EPOCH FROM ({time_col} - :target)))
+                                LIMIT 1
+                            """),
+                            {**params, "target": target_dt},
+                        ).fetchone()
+                        if not near:
+                            return json.dumps({
+                                "message": f"No {reading_type} readings found for this patient in the requested period.",
+                                "patient_id": patient_id,
+                                "note": "Report exactly this — do not substitute or display another patient's data."
+                            })
+                        return json.dumps({
+                            "type": "specific",
+                            "reading": {
+                                "value": float(near[0]) if near[0] is not None else None,
+                                "time": str(near[1]),
+                            }
+                        }, indent=2)
+
+                # -------------------------
+                # PLAIN VALUE QUESTION, NO TIME → DAY SUMMARY (not the peak)
+                # "what is my stress level on 21 July" has many readings that day;
+                # the old DESC fall-through returned only the highest, implying the
+                # peak was "the" level. Return an honest count/min/max/avg summary.
+                # -------------------------
+                if analysis_type == "specific" and not specific_time:
+                    agg = db.execute(
+                        text(f"""
+                            SELECT COUNT(*), MIN({column}), MAX({column}), AVG({column})
+                            FROM {table}
+                            WHERE patient_id = :patient_id AND {date_condition} AND {time_condition}
+                        """),
+                        params,
+                    ).fetchone()
+                    cnt = int(agg[0] or 0)
+                    if cnt == 0:
+                        return json.dumps({
+                            "message": f"No {reading_type} readings found for this patient in the requested period.",
+                            "patient_id": patient_id,
+                            "note": "Report exactly this — do not substitute or display another patient's data."
+                        })
+                    return json.dumps({
+                        "type": "day_summary",
+                        "reading_type": reading_type,
+                        "count": cnt,
+                        "average": round(float(agg[3]), 1) if agg[3] is not None else None,
+                        "lowest": float(agg[1]),
+                        "highest": float(agg[2]),
+                        "note": (
+                            "This period has multiple readings, so there is no single value. "
+                            "Report it as a summary — the average plus the low-to-high range — "
+                            "NOT just the highest. Never present the peak as the patient's level."
+                        )
+                    }, indent=2)
+
+                # -------------------------
+                # ANALYSIS TYPE (highest / lowest / specific-without-time)
                 # -------------------------
                 if analysis_type == "highest":
                     order = "DESC"
@@ -524,13 +620,20 @@ class SpecificMedicalValueTool(BaseTool):
                 # -------------------------
                 # QUERY
                 # -------------------------
+                # Tie-break by time so a tied extreme (e.g. several 80s on one
+                # day) always resolves to the SAME reading — the earliest one —
+                # instead of an arbitrary row. Without this, "lowest = 80" could
+                # report a different timestamp each run and never match the
+                # verify SQL (which uses ORDER BY value, time ASC). For "highest"
+                # (DESC) the earliest occurrence still reads most naturally, so
+                # time stays ASC in both cases.
                 query = f"""
                     SELECT {column}, {time_col}
                     FROM {table}
                     WHERE patient_id = :patient_id
                     AND {date_condition}
                     AND {time_condition}
-                    ORDER BY {column} {order}
+                    ORDER BY {column} {order}, {time_col} ASC
                     LIMIT 10
                 """
 
@@ -549,29 +652,28 @@ class SpecificMedicalValueTool(BaseTool):
                 formatted = [
                     {
                         "value": float(r[0]) if r[0] is not None else None,
-                        "time": str(r[1])
+                        "time": _friendly_dt(r[1])   # 'July 13, 2026 at 12:00 AM', not '00:00:00'
                     }
                     for r in results
                 ]
 
-                # Specific time handling
-                if analysis_type == "specific" and specific_time:
-                    try:
-                        target_time = datetime.fromisoformat(specific_time)
-                        closest = min(
-                            formatted,
-                            key=lambda x: abs(datetime.fromisoformat(x["time"]) - target_time)
-                        )
-                        return json.dumps({
-                            "type": "specific",
-                            "reading": closest
-                        }, indent=2)
-                    except Exception:
-                        pass
+                # For highest/lowest the answer is ONE reading — the top row after
+                # the ORDER BY. Surface it as a single authoritative field so the
+                # model has no list to mis-read and no reason to substitute a
+                # clinical threshold number (the "lowest = 70" hallucination:
+                # 70 is the Low<70 cutoff, not a real reading — real min was 51).
+                answer = formatted[0] if formatted else None
 
                 return json.dumps({
                     "type": analysis_type,
                     "reading_type": reading_type,
+                    "answer": answer,
+                    "note": (
+                        f"The {analysis_type} {reading_type} reading is EXACTLY "
+                        f"answer.value at answer.time. Report that number verbatim. "
+                        f"Do NOT report any normal-range boundary or clinical "
+                        f"threshold (e.g. 70/140/180) as the value."
+                    ),
                     "count": len(formatted),
                     "results": formatted
                 }, indent=2)

@@ -159,7 +159,16 @@ class PatientSummaryTool(BaseTool):
     ) -> str:
         try:
             user_context = getattr(self, "user_context", None)
-            if user_context:
+            # Role-based access control:
+            #  - Patient (role_id == 1): ALWAYS force their own id — a patient can
+            #    only ever see their own summary.
+            #  - Staff: keep the patient_id they asked for; if they named none,
+            #    default to their own id (self-summary), like the other tools.
+            # The old code forced EVERY logged-in user to their own id, so staff
+            # could never open a patient's summary.
+            if user_context and user_context.get("role_id") == 1:   # Patient
+                patient_id = user_context.get("user_id")
+            elif not patient_id and user_context:                   # Staff, none given
                 patient_id = user_context.get("user_id")
             if not patient_id:
                 return "Patient ID not found."

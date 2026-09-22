@@ -82,7 +82,7 @@ class DeviceTool(BaseTool):
                     "error": "User context not available"
                 })
             
-            role = user_context.get('role', '').lower()
+            role_id = user_context.get('role_id')
             current_user_id = user_context.get('user_id')
             
             with DatabaseManager() as db_manager:
@@ -92,19 +92,21 @@ class DeviceTool(BaseTool):
                         "error": "Database connection not available"
                     })
                 
-                # Get patient ID
-                patient_id = self._get_patient_id(patient_identifier, db_manager.db)
+                # Role-based access control. A patient may ONLY see their own devices,
+                # so FORCE the id to their own user_id and ignore whatever patient was
+                # named — the same pattern every other tool uses. (The old check
+                # compared user_context.get('role','') to 'patient', but the context
+                # carries 'role_id'/'role_name', not 'role', so the guard never fired
+                # and a patient could read another patient's device.)
+                if role_id == 1:  # Patient — locked to their own data
+                    patient_id = current_user_id
+                else:             # Staff — may look up any patient by name/ID
+                    patient_id = self._get_patient_id(patient_identifier, db_manager.db)
+                
                 if not patient_id:
                     return json.dumps({
                         "success": False,
                         "message": f"Patient '{patient_identifier}' not found"
-                    })
-                
-                # Role-based access control
-                if role == 'patient' and patient_id != current_user_id:
-                    return json.dumps({
-                        "success": False,
-                        "message": "You can only view your own device information"
                     })
                 
                 # Get patient name for display
@@ -154,23 +156,29 @@ class DeviceTool(BaseTool):
                     }, indent=2)
                 
                 else:
-                    # Check specific device
+                    # Check a specific device (e.g. CGM). For "is my CGM expired?" we
+                    # must look at the patient's MOST RECENT matching device REGARDLESS
+                    # of status — an expired CGM is status != 1, so the old
+                    # "status == 1" filter hid it and wrongly reported "no device
+                    # found" for a patient who does have one. Order by
+                    # session_start_date so the newest session is the one we report on.
                     device = db_manager.db.query(Devices).filter(
                         Devices.patient_id == patient_id,
-                        Devices.name.ilike(f'%{device_name}%'),
-                        Devices.status == 1  # Only active devices
-                    ).first()
+                        Devices.name.ilike(f'%{device_name}%')
+                    ).order_by(Devices.session_start_date.desc()).first()
                     
                     if not device:
+                        # Genuinely no such device ever — not merely "none active".
                         return json.dumps({
                             "success": False,
-                            "message": f"No active {device_name} device found for {patient_name}"
+                            "message": f"No {device_name} device found for {patient_name}"
                         })
                     
-                    # Calculate expiry information
+                    # Calculate expiry information (computed from session_start_date + 15 days)
                     is_expired = device.is_expired
                     expiry_date = device.expiry_date
                     days_until_expiry = device.days_until_expiry
+                    is_active = (device.status == 1)
                     
                     result = {
                         "success": True,
@@ -179,6 +187,7 @@ class DeviceTool(BaseTool):
                         "device_name": device.name,
                         "device_id": device.id,
                         "tag_id": device.tag_id,
+                        "is_active": is_active,
                         "is_expired": is_expired,
                         "expiry_date": expiry_date.isoformat() if expiry_date else None,
                         "days_until_expiry": days_until_expiry,
@@ -189,13 +198,13 @@ class DeviceTool(BaseTool):
                     # Add friendly message
                     if is_expired:
                         if expiry_date:
-                            result["message"] = f"{patient_name}'s {device.name} expired on {expiry_date.strftime('%Y-%m-%d')}"
+                            result["message"] = f"{patient_name}'s most recent {device.name} expired on {expiry_date.strftime('%Y-%m-%d')}."
                         else:
-                            result["message"] = f"{patient_name}'s {device.name} has expired"
+                            result["message"] = f"{patient_name}'s most recent {device.name} has expired."
                     elif days_until_expiry is not None:
-                        result["message"] = f"{patient_name}'s {device.name} expires in {days_until_expiry} days ({expiry_date.strftime('%Y-%m-%d')})"
+                        result["message"] = f"{patient_name}'s {device.name} is active and expires in {days_until_expiry} days ({expiry_date.strftime('%Y-%m-%d')})."
                     else:
-                        result["message"] = f"{patient_name}'s {device.name} is active but no expiry date available"
+                        result["message"] = f"{patient_name}'s {device.name} is active but no expiry date is available."
                     
                     return json.dumps(result, indent=2)
                     

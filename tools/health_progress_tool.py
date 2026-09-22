@@ -35,7 +35,8 @@ from typing import Optional
 import httpx
 from langchain.tools import BaseTool
 from dal.database import DatabaseManager
-from dal.postgres_db import resolve_range
+from dal.postgres_db import resolve_range, SessionLocalPG
+from sqlalchemy import text
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,40 @@ if not HEALTH_PROGRESS_BASE:
         "HEALTH_PROGRESS_BASE_URL is not set in .env — HealthProgressTool cannot function without it."
     )
 
+
+def _thin_axis_labels(dates: list) -> list:
+    """Keep every data point but show an x-axis label only at period-appropriate
+    boundaries, so long ranges stay readable. Returns a list the SAME length as
+    `dates`; non-label positions become "" (the point still plots — only the tick
+    text is blank). Spacing by total span, per the product spec:
+        <= 31 days  -> daily   (show every date)
+        <= 92 days  -> weekly  (first point of each ISO week)   [1-3 months]
+        <= 366 days -> monthly (first point of each month)      [3-12 months]
+        >  366 days -> quarterly (first point of each quarter)  [> 1 year]
+    """
+    if not dates:
+        return dates
+    try:
+        parsed = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
+    except (ValueError, TypeError):
+        return dates  # unexpected format — leave labels untouched
+
+    span = (parsed[-1] - parsed[0]).days
+    out, last_key = [], None
+    for i, dt in enumerate(parsed):
+        if span <= 31:
+            show = True
+        elif span <= 92:
+            key = dt.isocalendar()[:2]          # (year, ISO week)
+            show, last_key = key != last_key, key
+        elif span <= 366:
+            key = (dt.year, dt.month)           # month
+            show, last_key = key != last_key, key
+        else:
+            key = (dt.year, (dt.month - 1) // 3)  # quarter
+            show, last_key = key != last_key, key
+        out.append(dates[i] if show else "")
+    return out
 
 def _format_glucose_trend_prose(summary: dict, from_date: str, to_date: str,
                                 is_fallback: bool = False) -> str:
@@ -301,10 +336,16 @@ class HealthProgressBase(BaseTool):
                 "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
             }
 
+        _g_dates = [d["glucoseDate"] for d in glucose_daily]
         chart_data = {
             "type": "line",
-            "title": f"Mean glucose - {from_date} to {to_date}",
-            "x_labels": [d["glucoseDate"] for d in glucose_daily],
+            "title": "Mean Glucose Trend",
+            # Exact analyzed period, shown SEPARATELY from the title, using the dates
+            # actually covered by the data (not the wide all-history window).
+            "period": f"{min(_g_dates)} to {max(_g_dates)}" if _g_dates else f"{from_date} to {to_date}",
+            # All data points are kept (series.values is untouched); only the x-axis
+            # LABELS are thinned so long ranges stay readable.
+            "x_labels": _g_dates,
             "series": [{"name": "Mean glucose (mg/dL)", "values": [d["meanGlucose"] for d in glucose_daily]}],
             "stats": {
                 "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
@@ -600,8 +641,39 @@ class HealthProgressBase(BaseTool):
                 if user_context is not None:
                     user_context['_last_glucose_trend_text'] = msg
                 return msg
+
+            # CV FIX: the healthProgress API returns a per-DAY CV, and averaging
+            # those daily CVs (the value _summarize produced) captures only
+            # WITHIN-day variability — it drops the between-day swings, so it badly
+            # understates the clinical %CV (defined over ALL readings in the period,
+            # target <36%). Recompute the true period CV from the raw glucose
+            # readings so it matches the clinical definition and the chart's data.
+            try:
+                _pg = SessionLocalPG()
+                try:
+                    _cv_row = _pg.execute(text("""
+                        SELECT STDDEV_SAMP(glucose_value) / NULLIF(AVG(glucose_value), 0) * 100
+                        FROM glucose_readings
+                        WHERE patient_id = :pid
+                          AND DATE(local_event_time) BETWEEN :start AND :end
+                    """), {"pid": patient_id, "start": from_date, "end": to_date}).fetchone()
+                    if _cv_row and _cv_row[0] is not None:
+                        summary["avg_cv_pct"] = round(float(_cv_row[0]), 1)
+                finally:
+                    _pg.close()
+            except Exception:
+                pass  # if the direct query fails, keep the API-derived value
+
+            # Label the period with the dates ACTUALLY covered by the data, not the
+            # requested window. With no explicit period the window is a wide
+            # all-history floor (today - TREND_ALL_HISTORY_LOOKBACK_DAYS), so using
+            # from_date/to_date claimed "from 2024" for a patient whose data starts
+            # only in 2026. Fall back to the window only if no dated rows exist.
+            _dates = sorted(d["glucoseDate"] for d in glucose_daily if d.get("glucoseDate"))
+            label_from = _dates[0] if _dates else from_date
+            label_to = _dates[-1] if _dates else to_date
             glucose_prose = _format_glucose_trend_prose(
-                summary, from_date, to_date,
+                summary, label_from, label_to,
                 is_fallback=(status != "ok"),
             )
             # Deliver verbatim, bypassing the LLM's formatting entirely (same
@@ -672,8 +744,9 @@ class TIRTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("tir", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("tir", patient_id, patient_name, from_date, to_date, period)
 
 
 class SleepTrendTool(HealthProgressBase):
@@ -687,8 +760,9 @@ class SleepTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("sleep", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("sleep", patient_id, patient_name, from_date, to_date, period)
 
 
 class ActivityTrendTool(HealthProgressBase):
@@ -700,8 +774,9 @@ class ActivityTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("activity", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("activity", patient_id, patient_name, from_date, to_date, period)
 
 
 class HeartRateTrendTool(HealthProgressBase):
@@ -713,8 +788,9 @@ class HeartRateTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("heart_rate", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("heart_rate", patient_id, patient_name, from_date, to_date, period)
 
 
 class StressHRVTrendTool(HealthProgressBase):
@@ -726,8 +802,9 @@ class StressHRVTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("stress_hrv", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("stress_hrv", patient_id, patient_name, from_date, to_date, period)
 
 
 class HbA1cTrendTool(HealthProgressBase):
@@ -738,8 +815,9 @@ class HbA1cTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("hba1c", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("hba1c", patient_id, patient_name, from_date, to_date, period)
 
 
 class FBSTrendTool(HealthProgressBase):
@@ -751,8 +829,9 @@ class FBSTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("fbs", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("fbs", patient_id, patient_name, from_date, to_date, period)
 
 
 class BPTrendTool(HealthProgressBase):
@@ -764,5 +843,6 @@ class BPTrendTool(HealthProgressBase):
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
-        return self._run_for_metric("bp", patient_id, patient_name, from_date, to_date)
+              from_date: Optional[str] = None, to_date: Optional[str] = None,
+              period: Optional[str] = None) -> str:
+        return self._run_for_metric("bp", patient_id, patient_name, from_date, to_date, period)

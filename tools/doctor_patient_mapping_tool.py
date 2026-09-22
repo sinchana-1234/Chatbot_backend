@@ -11,6 +11,13 @@ from dal.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
+# Role IDs from the `role` table. In this system the "Diabetic Health Advisor"
+# (DHA) the chatbot refers to is the Health Coach role — there is no separate
+# DHA role. A patient is mapped to BOTH their Doctor and their Health Coach in
+# patients_doctors_mapping, so role_id is what separates the two.
+ROLE_DOCTOR = 2         # role.name = 'Doctor'
+ROLE_HEALTH_COACH = 3   # role.name = 'Health Coach'  → the DHA
+
 class DoctorPatientMappingTool(BaseTool):
     """Tool for getting doctor-patient mapping information with role-based access"""
     name: str = "get_doctor_patient_info"
@@ -122,8 +129,13 @@ class DoctorPatientMappingTool(BaseTool):
                                 "qualification": getattr(doctor_details, 'qualification', None),
                             })
                     else:
-                        # No primary doctor found, get all assigned doctors
-                        all_doctors = db_manager.get_patient_doctors(patient_id=patient_id)
+                        # No primary doctor found, get all assigned users — then keep
+                        # ONLY those whose role is Doctor (role_id 2). The mapping links a
+                        # patient to BOTH their Doctor and their Health Coach, so without
+                        # this filter the Health Coach was wrongly listed as a doctor.
+                        all_assigned = db_manager.get_patient_doctors(patient_id=patient_id)
+                        all_doctors = [d for d in (all_assigned or [])
+                                       if d.get('doctor_role_id') == ROLE_DOCTOR]
                         
                         if not all_doctors:
                             return json.dumps({
@@ -142,56 +154,44 @@ class DoctorPatientMappingTool(BaseTool):
                     return json.dumps(result, indent=2)
                 
                 elif query_type == "my_dha" or query_type == "patient_dha":
-                    # Get all doctors (including DHA) for the patient
-                    patient_doctors = db_manager.get_patient_doctors(patient_id=patient_id, active_only=True)
-                    
-                    if not patient_doctors:
+                    # The "Diabetic Health Advisor" (DHA) in this app IS the Health Coach
+                    # role (role_id 3) — not a text match on specialization/qualification.
+                    # The mapping links a patient to their Doctor (role 2) AND their Health
+                    # Coach (role 3); select ONLY the Health Coach here.
+                    all_assigned = db_manager.get_patient_doctors(patient_id=patient_id, active_only=True)
+                    dha_users = [d for d in (all_assigned or [])
+                                 if d.get('doctor_role_id') == ROLE_HEALTH_COACH]
+
+                    if not dha_users:
                         return json.dumps({
-                            "message": f"No doctors/DHA found for patient {patient_id}",
+                            "message": f"No Diabetic Health Advisor (Health Coach) is assigned to patient {patient_id}.",
                             "patient_id": patient_id,
-                            "doctors": [],
                             "dha_details": []
                         }, indent=2)
-                    
-                    # Get detailed information for each doctor
-                    detailed_doctors = []
+
                     dha_details = []
-                    
-                    for doctor in patient_doctors:
-                        doctor_user = db_manager.get_users(user_id=doctor['user_id'])
-                        if doctor_user:
-                            doctor_info = {
-                                "doctor_id": doctor['user_id'],
-                                "doctor_name": doctor['doctor_name'],
-                                "doctor_email": doctor['doctor_email'],
-                                "mobile_number": doctor_user[0].mobile_number,
-                                "role_id": doctor['doctor_role_id'],
-                                "is_primary": doctor['is_primary'],
-                                "assignment_from": doctor['from_date'],
-                                "assignment_to": doctor['to_date'],
-                                "is_active": doctor['is_active'],
-                                "qualification": getattr(doctor_user[0], 'qualification', None),
-                                "specialization": getattr(doctor_user[0], 'specialization', None),
-                                "hospital_name": getattr(doctor_user[0], 'hospital_name', None)
-                            }
-                            
-                            detailed_doctors.append(doctor_info)
-                            
-                            # Check if this is DHA (Department of Health Authorization)
-                            # Assuming DHA has specific role_id or specialization
-                            if (doctor_info.get('specialization') and 
-                                'dha' in doctor_info['specialization'].lower()) or \
-                               (doctor_info.get('qualification') and 
-                                'dha' in doctor_info['qualification'].lower()):
-                                dha_details.append(doctor_info)
-                    
+                    for d in dha_users:
+                        dha_user = db_manager.get_users(user_id=d['user_id'])
+                        detail = {
+                            "dha_id": d['user_id'],
+                            "dha_name": d['doctor_name'],
+                            "dha_email": d['doctor_email'],
+                            "role_id": d['doctor_role_id'],
+                            "is_primary": d['is_primary'],
+                            "assignment_from": d['from_date'],
+                            "assignment_to": d['to_date'],
+                            "is_active": d['is_active'],
+                        }
+                        if dha_user:
+                            detail["mobile_number"] = dha_user[0].mobile_number
+                            detail["qualification"] = getattr(dha_user[0], 'qualification', None)
+                        dha_details.append(detail)
+
                     return json.dumps({
                         "patient_id": patient_id,
-                        "total_doctors": len(detailed_doctors),
-                        "doctors": detailed_doctors,
+                        "total_dha": len(dha_details),
                         "dha_details": dha_details,
-                        "message": f"Found {len(detailed_doctors)} doctors for patient {patient_id}" + 
-                                  (f", including {len(dha_details)} DHA personnel" if dha_details else "")
+                        "message": f"Found {len(dha_details)} Diabetic Health Advisor(s) for patient {patient_id}."
                     }, indent=2)
                 
                 elif query_type == "doctor_patients":
