@@ -138,6 +138,7 @@ class CorrelationAnalysisTool(BaseTool):
                              - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)
                              ).strftime("%Y-%m-%d")
 
+            object.__setattr__(self, '_resolved_window', (start, end))
             logger.debug(f"Fetching correlation data for patient {patient_id} from {start} to {end}")
             return tool._fetch(patient_id, start, end, auth_token)
         except Exception as e:
@@ -200,12 +201,12 @@ class CorrelationAnalysisTool(BaseTool):
         Calculate Pearson correlation between factor and glucose
         Minimum 10 paired days required for medical significance
         """
-        if len(factor_values) < 10:
+        if len(factor_values) < 5:
             return {
                 "status": "insufficient_data",
                 "correlation": "unknown",
                 "strength": None,
-                "message": f"Only {len(factor_values)} paired days. Need at least 10 for reliable correlation."
+                "message": f"Only {len(factor_values)} paired days. Need at least 5 to estimate a correlation."
             }
 
         if len(factor_values) != len(glucose_values):
@@ -257,13 +258,19 @@ class CorrelationAnalysisTool(BaseTool):
             strength_desc = "weak"
             interpretation = "little to no clear relationship"
 
+        reliability = "preliminary" if len(factor_values) < 10 else "reliable"
         return {
             "status": "ok",
             "correlation": corr_type,
             "strength": correlation,
             "strength_desc": strength_desc,
             "interpretation": interpretation,
-            "data_points": len(factor_values)
+            "data_points": len(factor_values),
+            "reliability": reliability,
+            "reliability_note": (
+                f"Based on {len(factor_values)} paired days — treat as a preliminary signal, "
+                "not a confirmed relationship."
+            ) if len(factor_values) < 10 else None
         }
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
@@ -311,7 +318,8 @@ class CorrelationAnalysisTool(BaseTool):
             # Build response
             response = {
                 "patient_id": patient_id,
-                "period": f"{from_date} to {to_date}" if from_date and to_date else "All available data",
+                "period": f"{self._resolved_window[0]} to {self._resolved_window[1]}"
+                          if getattr(self, '_resolved_window', None) else "unknown",
                 "correlations": {
                     "stress_vs_glucose": stress_correlation,
                     "sleep_vs_glucose": sleep_correlation,

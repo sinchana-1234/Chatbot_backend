@@ -56,13 +56,13 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
         return (
             f"There isn't enough matching data to reliably assess how stress affects {name}'s glucose.\n\n"
             f"Only {total} {d} have both stress and glucose readings, which is too few to "
-            f"compare. More overlapping data is needed."
+            f"compare. More data is needed."
         )
 
-    stresses = sorted(s for s, _ in days)
+    stresses = sorted(s for _, s, _ in days)
     med = median(stresses)
-    lower = [g for s, g in days if s <= med]
-    higher = [g for s, g in days if s > med]
+    lower = [(d, s, g) for d, s, g in days if s <= med]
+    higher = [(d, s, g) for d, s, g in days if s > med]
 
     # If the median sits on a spike of identical values, one side can be empty.
     if not lower or not higher:
@@ -72,8 +72,8 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
             f"scale), so there's no spread of stress levels to compare."
         )
 
-    lower_g = round(sum(lower) / len(lower))
-    higher_g = round(sum(higher) / len(higher))
+    lower_g = round(sum(g for _, _, g in lower) / len(lower))
+    higher_g = round(sum(g for _, _, g in higher) / len(higher))
     delta = higher_g - lower_g          # +ve = higher stress, higher glucose
     based_on = f"based on {total} days{rng} with both stress and glucose data"
 
@@ -84,11 +84,19 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     else:
         headline = f"{name}'s glucose was lower on higher-stress days, {based_on}."
 
+    def _rows(group):
+        return "\n".join(
+            f"    - {d}: stress {round(s)} \u2192 {round(g)} mg/dL"
+            for d, s, g in sorted(group, key=lambda r: r[0])
+        )
+
     lines = [
         f"* Lower-stress days (stress at or below {round(med)}): {len(lower)} days "
         f"\u2014 average glucose {lower_g} mg/dL",
+        _rows(lower),
         f"* Higher-stress days (stress above {round(med)}): {len(higher)} days "
         f"\u2014 average glucose {higher_g} mg/dL",
+        _rows(higher),
     ]
     out = headline + "\n\n" + "\n".join(lines)
 
@@ -137,7 +145,7 @@ def _daily_stress_glucose(patient_id: int, start=None, end=None):
     for s in stress:
         ag = glu_by_day.get(s["day"])
         if ag is not None and s["stress"] is not None:
-            days.append((float(s["stress"]), float(ag)))
+            days.append((s["day"], float(s["stress"]), float(ag)))   # keep the date
             present.append(s["day"])
     first = min(present) if present else None
     last = max(present) if present else None

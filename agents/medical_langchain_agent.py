@@ -657,19 +657,36 @@ These rules ensure CONSISTENT responses for the same question, every time:
      summaries. Those bullet formats apply ONLY to those tools. get_glucose_trend's
      output is already prose and must be passed through unchanged.
 
-6. **GLUCOSE CORRELATION QUERIES - SPECIAL HANDLING**:
-   - For questions about HOW lifestyle factors affect glucose → use analyze_glucose_correlations
-   - Correlation questions include:
-     * "What are this patient's glucose trends?" → analyze_glucose_correlations (not just glucose_trend)
-     * "When does this patient's glucose go high?" → pattern analysis via correlations
-     * "Has this patient had any low glucose episodes?" → pattern analysis via correlations
-     * "How does activity affect this patient's glucose?" → MUST use analyze_glucose_correlations
-     * "How do sleep and stress relate to this patient's glucose?" → MUST use analyze_glucose_correlations
-     * "How has this patient's glucose changed over time?" → use get_glucose_trend (trend data)
-     * "What are the main concerns in this patient's data?" → MUST use analyze_glucose_correlations
-   - The tool returns: favorability of stress/sleep/activity + overall association + concerns
-   - Format response with the Overall Association and concerns, NOT raw numbers
-   - NEVER show raw stress/sleep/activity numbers — show only favorability interpretation
+6. **LIFESTYLE → GLUCOSE & GLUCOSE-PATTERN QUERIES - SPECIAL HANDLING**:
+   These questions are answered by the IMPACT tools, which return a finished, ready-to-send
+   summary grounded in the patient's real readings and dates. Relay their output verbatim —
+   do not reformat or add to it.
+
+   - SINGLE factor vs glucose:
+     * "How does activity affect this patient's glucose?" / "does being more active lower glucose?"
+       → get_activity_glucose_impact
+     * "How does sleep affect this patient's glucose?" → get_sleep_glucose_impact
+     * "How does stress affect this patient's glucose?" → get_stress_glucose_impact
+   - TWO OR MORE factors, or a general lifestyle / "concerns" question:
+     * "How do sleep and stress relate to glucose?", "how do lifestyle factors affect glucose?",
+       "what factors may be affecting this patient's glucose?", "what are the main concerns in
+       this patient's data?" → get_lifestyle_glucose_impact (pass the factors named in the
+       question; if none are named, pass all three: sleep, stress, activity).
+   - GLUCOSE PATTERNS / TRENDS (about glucose itself, not a lifestyle factor):
+     * "glucose trend(s)", "how has glucose changed over time", "show the trend" → get_glucose_trend
+     * "when does glucose go high?", "any low glucose episodes?", "when do spikes happen?"
+       → get_glucose_trend (it carries the actual daily readings and their dates)
+
+   - analyze_glucose_correlations is ONLY for a request that EXPLICITLY asks for a correlation
+     or to "correlate" (e.g. "what's the correlation between activity and glucose?", "correlate
+     this patient's glucose with lifestyle"). Do NOT use it for the plain "how does X affect
+     glucose" / "factors" / "main concerns" questions above. NEVER call an impact tool AND
+     analyze_glucose_correlations for the same question.
+
+   - PATIENT-SPECIFIC ONLY: relay the tool's real numbers and dates. NEVER add generic health
+     advice, textbook statements, or any mention of medications or health conditions unless a
+     tool returned them. When a factor has too few days, the tool already says so — pass that
+     through; never invent a factor or claim "no data" when the tool returned some.
 
 7. **DEVICE QUERIES - SPECIAL HANDLING**:
    - For "When does my CGM expire?", "Is my CGM expired?" → ALWAYS use check_device_status

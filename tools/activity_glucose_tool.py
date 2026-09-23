@@ -46,18 +46,23 @@ STEP_CUTS = [
 
 
 def _bucket(days: list) -> list:
-    """days: list of (steps, avg_glucose). Returns non-empty buckets, low->high activity."""
+    """days: list of (date, steps, avg_glucose). Returns non-empty buckets, low->high activity.
+    Each bucket keeps its per-day rows so the exact affecting days can be listed."""
     out = []
     for lo, hi, label, short in STEP_CUTS:
-        vals = [g for st, g in days if st is not None and st >= lo and (hi is None or st < hi)]
-        if vals:
+        rows = [(d, st, g) for d, st, g in days
+                if st is not None and st >= lo and (hi is None or st < hi)]
+        if rows:
+            vals = [g for _, _, g in rows]
             out.append({
                 "label": label,
                 "short": short,
                 "days": len(vals),
                 "avg_glucose": round(sum(vals) / len(vals)),
+                "rows": sorted(rows, key=lambda r: r[0]),   # (date, steps, glucose), by date
             })
     return out
+    
 
 
 def _format_activity_glucose(name: Optional[str], days: list) -> str:
@@ -75,7 +80,7 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
         d = "day" if total == 1 else "days"
         return (
             f"Only {total} {d} have both activity and glucose data for {name}, which is too "
-            f"little to tell how activity affects glucose. More overlapping data is needed."
+            f"little to tell how activity affects glucose. More  data is needed."
         )
 
     buckets = _bucket(days)
@@ -100,10 +105,12 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
     else:
         headline = f"{name}'s glucose levels were higher on days with higher activity, {based_on}."
 
-    lines = [
-        f"* **{b['label']}:** {b['days']} days \u2014 average glucose {b['avg_glucose']} mg/dL"
-        for b in buckets
-    ]
+    lines = []
+    for b in buckets:
+        d = "day" if b["days"] == 1 else "days"
+        lines.append(f"* **{b['label']}:** {b['days']} {d} \u2014 average glucose {b['avg_glucose']} mg/dL")
+        for day, steps, g in b["rows"]:
+            lines.append(f"    - {day}: {int(steps):,} steps \u2192 {round(g)} mg/dL")
     out = headline + "\n\n" + "\n".join(lines)
 
     if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
@@ -115,12 +122,15 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
         thin = [b for b in (low_b, high_b) if b["days"] < settings.MIN_DAYS_FOR_FIRM_RESULT]
         if thin:
             if len(thin) == 1:
+                _d = "day" if thin[0]['days'] == 1 else "days"
                 overall += (
-                    f"\nThe {thin[0]['short']} group includes only {thin[0]['days']} days, "
+                    f"\nThe {thin[0]['short']} group includes only {thin[0]['days']} {_d}, "
                     f"so this pattern should be interpreted with caution."
                 )
             else:
-                groups = " and ".join(f"{b['short']} ({b['days']} days)" for b in thin)
+                groups = " and ".join(
+                    f"{b['short']} ({b['days']} {'day' if b['days'] == 1 else 'days'})" for b in thin
+                )
                 overall += (
                     f"\nThe {groups} groups are small, so this pattern should be "
                     f"interpreted with caution."
@@ -157,7 +167,7 @@ def _daily_activity_glucose(patient_id: int, start=None, end=None) -> list:
     for s in steps:
         ag = glu_by_day.get(s["day"])
         if ag is not None and s["steps"] is not None:
-            days.append((s["steps"], float(ag)))
+            days.append((s["day"], s["steps"], float(ag)))   # keep the date
     return days
 
 

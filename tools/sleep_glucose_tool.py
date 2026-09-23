@@ -54,13 +54,17 @@ def _fmt_range(first, last) -> str:
 
 
 def _bucket(nights: list) -> list:
-    """nights: list of (hours, avg_glucose). Returns non-empty buckets, short->long."""
+    """nights: list of (date, hours, avg_glucose). Returns non-empty buckets, short->long.
+    Each bucket keeps its per-night rows so the exact nights can be listed."""
     out = []
     for lo, hi, label, short in SLEEP_CUTS:
-        vals = [g for h, g in nights if h is not None and h >= lo and (hi is None or h < hi)]
-        if vals:
+        rows = [(d, h, g) for d, h, g in nights
+                if h is not None and h >= lo and (hi is None or h < hi)]
+        if rows:
+            vals = [g for _, _, g in rows]
             out.append({"label": label, "short": short, "days": len(vals),
-                        "avg_glucose": round(sum(vals) / len(vals))})
+                        "avg_glucose": round(sum(vals) / len(vals)),
+                        "rows": sorted(rows, key=lambda r: r[0])})
     return out
 
 
@@ -81,7 +85,7 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
         return (
             f"There isn't enough matching data to reliably assess how sleep affects {name}'s glucose.\n\n"
             f"Only {total} {n} have both sleep and next-day glucose readings, which is too few "
-            f"to compare. More overlapping data is needed."
+            f"to compare. More  data is needed."
         )
 
     buckets = _bucket(nights)
@@ -106,10 +110,12 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
     else:
         headline = f"{name}'s next-day glucose was higher after longer sleep, {based_on}."
 
-    lines = [
-        f"* {b['label']}: {b['days']} nights \u2014 next-day glucose {b['avg_glucose']} mg/dL"
-        for b in buckets
-    ]
+    lines = []
+    for b in buckets:
+        n = "night" if b["days"] == 1 else "nights"
+        lines.append(f"* {b['label']}: {b['days']} {n} \u2014 next-day glucose {b['avg_glucose']} mg/dL")
+        for day, hours, g in b["rows"]:
+            lines.append(f"    - {day}: {hours:.1f} h sleep \u2192 {round(g)} mg/dL next day")
     out = headline + "\n\n" + "\n".join(lines)
 
     if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
@@ -164,7 +170,7 @@ def _nightly_sleep_glucose(patient_id: int, start=None, end=None):
     for s in sleep:
         ag = glu_by_day.get(s["day"])
         if ag is not None and s["hours"] is not None:
-            nights.append((float(s["hours"]), float(ag)))
+            nights.append((s["day"], float(s["hours"]), float(ag)))   # keep wake date
             days_present.append(s["day"])
     first = min(days_present) if days_present else None
     last = max(days_present) if days_present else None
