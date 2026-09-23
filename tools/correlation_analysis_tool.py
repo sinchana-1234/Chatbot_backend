@@ -2,12 +2,7 @@
 """
 Correlation Analysis Tool for Revival Medical System
 
-Analyzes how stress, sleep, and activity correlate with patient's glucose patterns.
-Uses the favorability table logic:
-- Stress: 0-60 favorable, 61-100 unfavorable
-- Sleep: 7-9 hours favorable, <7 or >9 hours unfavorable
-- Activity: ≥27,000 steps favorable, <4,000 steps unfavorable
-- Returns Overall Association count (2-3 favorable = good, mixed = neutral, etc.)
+Analyzes how stress, sleep, and activity CORRELATE WITH patient's glucose patterns.
 """
 
 import json
@@ -33,18 +28,18 @@ class CorrelationAnalysisTool(BaseTool):
     - to_date (str): End date (YYYY-MM-DD) — OPTIONAL
     - period (str): OPTIONAL relative phrase, e.g. 'last 30 days', 'this month'
 
-    Returns: Overall Association summary showing:
-    - Stress pattern favorability (0-60 = favorable, 61-100 = unfavorable)
-    - Sleep pattern favorability (7-9 hours = favorable, else unfavorable)
-    - Activity pattern favorability (≥27,000 steps = favorable, <4,000 = unfavorable)
-    - Overall Association (2-3 favorable patterns = good, mixed = neutral, etc.)
-    - Main concerns based on patterns
+    Returns: Correlation analysis showing:
+    - How stress levels correlate with glucose (positive/negative/none)
+    - How sleep duration correlates with glucose (positive/negative/none)
+    - How activity levels correlate with glucose (positive/negative/none)
+    - Overall pattern: which factor has strongest impact on glucose
+    - Actionable insights based on correlations
 
     Use for questions like:
     - "How does activity affect this patient's glucose?"
     - "How do sleep and stress relate to glucose?"
-    - "What are the main concerns in this patient's data?"
-    - "How has this patient's glucose changed over time?"
+    - "What lifestyle factor impacts glucose the most?"
+    - "Are there patterns between activity and glucose spikes?"
     """
 
     def __init__(self):
@@ -116,212 +111,142 @@ class CorrelationAnalysisTool(BaseTool):
 
             return matching_users[0].id, None
 
-    def _analyze_stress_pattern(self, stress_data: dict) -> dict:
+    def _calculate_correlation(self, factor_values: list, glucose_values: list) -> dict:
         """
-        Analyze stress favorability
-        Favorable: 0-60
-        Unfavorable: 61-100
+        Calculate simple correlation between a lifestyle factor and glucose
+        Returns: correlation strength (positive/negative/none) and strength value
         """
-        if not stress_data or stress_data.get("days_count", 0) == 0:
+        if len(factor_values) < 2 or len(glucose_values) < 2:
             return {
-                "status": "no_data",
-                "favorability": "unknown",
-                "avg_stress": None
+                "status": "insufficient_data",
+                "correlation": "unknown",
+                "strength": None,
+                "message": "Not enough data points to calculate correlation"
             }
 
-        avg_stress = stress_data.get("avg_stress_pct", 0)
+        # Simple correlation: if factor goes up, does glucose go up too?
+        factor_avg = sum(factor_values) / len(factor_values)
+        glucose_avg = sum(glucose_values) / len(glucose_values)
 
-        if avg_stress is None:
+        numerator = sum((f - factor_avg) * (g - glucose_avg) for f, g in zip(factor_values, glucose_values))
+        factor_variance = sum((f - factor_avg) ** 2 for f in factor_values)
+        glucose_variance = sum((g - glucose_avg) ** 2 for g in glucose_values)
+
+        if factor_variance == 0 or glucose_variance == 0:
             return {
-                "status": "no_data",
-                "favorability": "unknown",
-                "avg_stress": None
+                "status": "no_variance",
+                "correlation": "none",
+                "strength": 0,
+                "message": "No variance in data to correlate"
             }
 
-        favorability = "favorable" if avg_stress <= 60 else "unfavorable"
+        correlation = numerator / (factor_variance * glucose_variance) ** 0.5
+
+        if correlation > 0.3:
+            corr_type = "positive"
+            interpretation = "higher factor values tend to associate with higher glucose"
+        elif correlation < -0.3:
+            corr_type = "negative"
+            interpretation = "higher factor values tend to associate with lower glucose"
+        else:
+            corr_type = "weak/none"
+            interpretation = "little to no clear relationship"
 
         return {
             "status": "ok",
-            "favorability": favorability,
-            "avg_stress": avg_stress,
-            "interpretation": f"Average stress: {avg_stress}% ({'low/healthy' if avg_stress <= 60 else 'high/concerning'})"
+            "correlation": corr_type,
+            "strength": round(correlation, 2),
+            "interpretation": interpretation,
+            "data_points": len(factor_values)
         }
 
-    def _analyze_sleep_pattern(self, sleep_data: dict) -> dict:
-        """
-        Analyze sleep favorability
-        Favorable: 7-9 hours
-        Unfavorable: <7 or >9 hours
-        """
-        if not sleep_data or sleep_data.get("days_count", 0) == 0:
-            return {
-                "status": "no_data",
-                "favorability": "unknown",
-                "avg_sleep_hours": None
-            }
+    def _get_glucose_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
+        """Fetch glucose readings for the patient"""
+        try:
+            with DatabaseManager() as db_manager:
+                query = "SELECT reading_value, reading_date FROM patient_glucose_readings WHERE patient_id = %s"
+                params = [patient_id]
 
-        avg_light = sleep_data.get("avg_light_hrs", 0) or 0
-        avg_deep = sleep_data.get("avg_deep_hrs", 0) or 0
-        avg_rem = sleep_data.get("avg_rem_hrs", 0) or 0
-        total_sleep = avg_light + avg_deep + avg_rem
+                if from_date:
+                    query += " AND reading_date >= %s"
+                    params.append(from_date)
+                if to_date:
+                    query += " AND reading_date <= %s"
+                    params.append(to_date)
 
-        if total_sleep == 0:
-            return {
-                "status": "no_data",
-                "favorability": "unknown",
-                "avg_sleep_hours": None
-            }
+                query += " ORDER BY reading_date"
 
-        favorability = "favorable" if 7 <= total_sleep <= 9 else "unfavorable"
+                results = db_manager.execute_query(query, params)
+                return results if results else []
+        except Exception as e:
+            logger.error(f"Error fetching glucose data: {e}")
+            return []
 
-        return {
-            "status": "ok",
-            "favorability": favorability,
-            "avg_sleep_hours": round(total_sleep, 1),
-            "breakdown": {
-                "deep_hrs": round(avg_deep, 1),
-                "light_hrs": round(avg_light, 1),
-                "rem_hrs": round(avg_rem, 1)
-            },
-            "interpretation": f"Average sleep: {round(total_sleep, 1)} hours ({'optimal' if 7 <= total_sleep <= 9 else 'suboptimal'})"
-        }
+    def _get_stress_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
+        """Fetch stress readings for the patient"""
+        try:
+            with DatabaseManager() as db_manager:
+                query = "SELECT stress_percentage, reading_date FROM patient_stress_hrv WHERE patient_id = %s"
+                params = [patient_id]
 
-    def _analyze_activity_pattern(self, activity_data: dict) -> dict:
-        """
-        Analyze activity favorability
-        Favorable: ≥27,000 steps
-        Unfavorable: <4,000 steps
-        Neutral: 4,000-27,000 steps
-        """
-        if not activity_data or activity_data.get("days_count", 0) == 0:
-            return {
-                "status": "no_data",
-                "favorability": "unknown",
-                "avg_steps": None
-            }
+                if from_date:
+                    query += " AND reading_date >= %s"
+                    params.append(from_date)
+                if to_date:
+                    query += " AND reading_date <= %s"
+                    params.append(to_date)
 
-        avg_steps = activity_data.get("avg_steps", 0)
+                query += " ORDER BY reading_date"
 
-        if avg_steps is None or avg_steps == 0:
-            return {
-                "status": "no_data",
-                "favorability": "unknown",
-                "avg_steps": None
-            }
+                results = db_manager.execute_query(query, params)
+                return results if results else []
+        except Exception as e:
+            logger.error(f"Error fetching stress data: {e}")
+            return []
 
-        if avg_steps >= 27000:
-            favorability = "favorable"
-            interpretation = "High activity level (excellent for glucose control)"
-        elif avg_steps < 4000:
-            favorability = "unfavorable"
-            interpretation = "Low activity level (concerning for glucose control)"
-        else:
-            favorability = "neutral"
-            interpretation = "Moderate activity level"
+    def _get_sleep_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
+        """Fetch sleep duration for the patient"""
+        try:
+            with DatabaseManager() as db_manager:
+                query = "SELECT (deep_sleep_mins + light_sleep_mins) / 60.0 as sleep_hours, reading_date FROM patient_sleep WHERE patient_id = %s"
+                params = [patient_id]
 
-        return {
-            "status": "ok",
-            "favorability": favorability,
-            "avg_steps": int(avg_steps),
-            "interpretation": interpretation
-        }
+                if from_date:
+                    query += " AND reading_date >= %s"
+                    params.append(from_date)
+                if to_date:
+                    query += " AND reading_date <= %s"
+                    params.append(to_date)
 
-    def _calculate_overall_association(self, stress: dict, sleep: dict, activity: dict) -> dict:
-        """
-        Calculate overall association based on favorability counts:
-        - 2-3 favorable patterns = good association
-        - 1 favorable + 1-2 unfavorable = mixed association
-        - 0-1 favorable = concerning association
-        """
-        favorable_count = 0
-        unfavorable_count = 0
-        unknown_count = 0
+                query += " ORDER BY reading_date"
 
-        patterns = []
+                results = db_manager.execute_query(query, params)
+                return results if results else []
+        except Exception as e:
+            logger.error(f"Error fetching sleep data: {e}")
+            return []
 
-        # Count stress
-        if stress.get("status") == "ok":
-            if stress.get("favorability") == "favorable":
-                favorable_count += 1
-                patterns.append(f"✅ Low stress ({stress.get('avg_stress')}%)")
-            elif stress.get("favorability") == "unfavorable":
-                unfavorable_count += 1
-                patterns.append(f"❌ High stress ({stress.get('avg_stress')}%)")
-        else:
-            unknown_count += 1
-            patterns.append("⚠️ Stress data: insufficient")
+    def _get_activity_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
+        """Fetch activity (steps) for the patient"""
+        try:
+            with DatabaseManager() as db_manager:
+                query = "SELECT steps, activity_date FROM patient_activity WHERE patient_id = %s"
+                params = [patient_id]
 
-        # Count sleep
-        if sleep.get("status") == "ok":
-            if sleep.get("favorability") == "favorable":
-                favorable_count += 1
-                patterns.append(f"✅ Optimal sleep ({sleep.get('avg_sleep_hours')} hrs)")
-            elif sleep.get("favorability") == "unfavorable":
-                unfavorable_count += 1
-                patterns.append(f"❌ Suboptimal sleep ({sleep.get('avg_sleep_hours')} hrs)")
-        else:
-            unknown_count += 1
-            patterns.append("⚠️ Sleep data: insufficient")
+                if from_date:
+                    query += " AND activity_date >= %s"
+                    params.append(from_date)
+                if to_date:
+                    query += " AND activity_date <= %s"
+                    params.append(to_date)
 
-        # Count activity
-        if activity.get("status") == "ok":
-            if activity.get("favorability") == "favorable":
-                favorable_count += 1
-                patterns.append(f"✅ High activity ({activity.get('avg_steps'):,} steps)")
-            elif activity.get("favorability") == "unfavorable":
-                unfavorable_count += 1
-                patterns.append(f"❌ Low activity ({activity.get('avg_steps'):,} steps)")
-            else:  # neutral
-                patterns.append(f"⚠️ Moderate activity ({activity.get('avg_steps'):,} steps)")
-        else:
-            unknown_count += 1
-            patterns.append("⚠️ Activity data: insufficient")
+                query += " ORDER BY activity_date"
 
-        # Determine overall association
-        if favorable_count >= 2:
-            overall = "Good - Multiple favorable patterns supporting glucose control"
-        elif favorable_count == 1 and unfavorable_count <= 1:
-            overall = "Mixed - Some favorable, some unfavorable patterns"
-        elif favorable_count == 1 and unfavorable_count >= 2:
-            overall = "Concerning - More unfavorable patterns than favorable"
-        else:
-            overall = "Concerning - Few favorable patterns"
-
-        return {
-            "overall_association": overall,
-            "pattern_summary": {
-                "favorable": favorable_count,
-                "unfavorable": unfavorable_count,
-                "unknown": unknown_count
-            },
-            "patterns": patterns,
-            "concerns": self._generate_concerns(stress, sleep, activity, favorable_count, unfavorable_count)
-        }
-
-    def _generate_concerns(self, stress: dict, sleep: dict, activity: dict, favorable: int, unfavorable: int) -> list:
-        """Generate list of main concerns based on patterns"""
-        concerns = []
-
-        if stress.get("favorability") == "unfavorable":
-            concerns.append("High stress levels may impair glucose control")
-
-        if sleep.get("favorability") == "unfavorable":
-            avg_sleep = sleep.get("avg_sleep_hours")
-            if avg_sleep and avg_sleep < 7:
-                concerns.append("Insufficient sleep (<7 hours) can worsen glucose patterns")
-            elif avg_sleep and avg_sleep > 9:
-                concerns.append("Excessive sleep (>9 hours) may indicate sleep issues affecting glucose")
-
-        if activity.get("favorability") == "unfavorable":
-            concerns.append("Low activity levels (<4,000 steps) reduce glucose utilization")
-
-        if unfavorable >= 2:
-            concerns.append("Multiple risk factors present - comprehensive lifestyle intervention recommended")
-
-        if not concerns:
-            concerns.append("No significant concerns identified - current lifestyle patterns support glucose control")
-
-        return concerns
+                results = db_manager.execute_query(query, params)
+                return results if results else []
+        except Exception as e:
+            logger.error(f"Error fetching activity data: {e}")
+            return []
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
              from_date: Optional[str] = None, to_date: Optional[str] = None,
@@ -332,62 +257,114 @@ class CorrelationAnalysisTool(BaseTool):
         if resolution_error:
             return resolution_error
 
-        # Import trend tools to get data
         try:
-            from tools.health_progress_tool import StressHRVTrendTool, SleepTrendTool, ActivityTrendTool
+            # Fetch all data
+            glucose_data = self._get_glucose_data(patient_id, from_date, to_date)
+            stress_data = self._get_stress_data(patient_id, from_date, to_date)
+            sleep_data = self._get_sleep_data(patient_id, from_date, to_date)
+            activity_data = self._get_activity_data(patient_id, from_date, to_date)
 
-            stress_tool = StressHRVTrendTool()
-            sleep_tool = SleepTrendTool()
-            activity_tool = ActivityTrendTool()
+            if not glucose_data:
+                return json.dumps({
+                    "error": "No glucose data found for this patient in the specified period",
+                    "patient_id": patient_id
+                })
 
-            # Set user context
-            user_context = getattr(self, 'user_context', None)
-            if user_context:
-                stress_tool.set_user_context(user_context)
-                sleep_tool.set_user_context(user_context)
-                activity_tool.set_user_context(user_context)
+            # Align dates for correlation (same dates across all datasets)
+            glucose_dict = {str(g[1]): g[0] for g in glucose_data}
+            stress_dict = {str(s[1]): s[0] for s in stress_data}
+            sleep_dict = {str(s[1]): s[0] for s in sleep_data}
+            activity_dict = {str(a[1]): a[0] for a in activity_data}
 
-            # Fetch data from each tool
-            stress_result = stress_tool._run(patient_id=patient_id, from_date=from_date, to_date=to_date, period=period)
-            sleep_result = sleep_tool._run(patient_id=patient_id, from_date=from_date, to_date=to_date, period=period)
-            activity_result = activity_tool._run(patient_id=patient_id, from_date=from_date, to_date=to_date, period=period)
+            # Find common dates
+            common_dates = set(glucose_dict.keys())
+            if stress_data:
+                common_dates &= set(stress_dict.keys())
+            if sleep_data:
+                common_dates &= set(sleep_dict.keys())
+            if activity_data:
+                common_dates &= set(activity_dict.keys())
 
-            # Parse results
-            stress_data = json.loads(stress_result).get("summary", {}) if stress_result else {}
-            sleep_data = json.loads(sleep_result).get("summary", {}) if sleep_result else {}
-            activity_data = json.loads(activity_result).get("summary", {}) if activity_result else {}
+            common_dates = sorted(list(common_dates))
+
+            if not common_dates:
+                return json.dumps({
+                    "error": "No overlapping dates found between glucose and lifestyle data",
+                    "patient_id": patient_id,
+                    "message": "Need data on the same dates to calculate correlations"
+                })
+
+            # Extract aligned values
+            glucose_values = [glucose_dict[d] for d in common_dates]
+            stress_values = [stress_dict.get(d, None) for d in common_dates]
+            sleep_values = [sleep_dict.get(d, None) for d in common_dates]
+            activity_values = [activity_dict.get(d, None) for d in common_dates]
+
+            # Calculate correlations
+            stress_correlation = self._calculate_correlation(
+                [s for s in stress_values if s is not None],
+                [glucose_dict[common_dates[i]] for i, s in enumerate(stress_values) if s is not None]
+            ) if any(s is not None for s in stress_values) else {"status": "no_data", "correlation": "unknown"}
+
+            sleep_correlation = self._calculate_correlation(
+                [s for s in sleep_values if s is not None],
+                [glucose_dict[common_dates[i]] for i, s in enumerate(sleep_values) if s is not None]
+            ) if any(s is not None for s in sleep_values) else {"status": "no_data", "correlation": "unknown"}
+
+            activity_correlation = self._calculate_correlation(
+                [a for a in activity_values if a is not None],
+                [glucose_dict[common_dates[i]] for i, a in enumerate(activity_values) if a is not None]
+            ) if any(a is not None for a in activity_values) else {"status": "no_data", "correlation": "unknown"}
+
+            # Build response
+            response = {
+                "patient_id": patient_id,
+                "period_analyzed": f"{common_dates[0]} to {common_dates[-1]}" if common_dates else "N/A",
+                "data_points_aligned": len(common_dates),
+                "correlations": {
+                    "stress_vs_glucose": stress_correlation,
+                    "sleep_vs_glucose": sleep_correlation,
+                    "activity_vs_glucose": activity_correlation
+                },
+                "summary": self._generate_summary(stress_correlation, sleep_correlation, activity_correlation),
+                "message": "Correlation analysis complete"
+            }
+
+            return json.dumps(response)
 
         except Exception as e:
-            logger.error(f"Error fetching correlation data: {e}")
+            logger.error(f"Error in correlation analysis: {e}")
             return json.dumps({
                 "error": f"Failed to analyze correlations: {str(e)}",
                 "patient_id": patient_id
             })
 
-        # Analyze patterns
-        stress_analysis = self._analyze_stress_pattern(stress_data)
-        sleep_analysis = self._analyze_sleep_pattern(sleep_data)
-        activity_analysis = self._analyze_activity_pattern(activity_data)
+    def _generate_summary(self, stress_corr: dict, sleep_corr: dict, activity_corr: dict) -> str:
+        """Generate human-readable summary of correlations"""
+        findings = []
 
-        # Calculate overall association
-        overall = self._calculate_overall_association(stress_analysis, sleep_analysis, activity_analysis)
+        if stress_corr.get("status") == "ok":
+            if stress_corr["correlation"] == "positive":
+                findings.append(f"Higher stress is associated with higher glucose levels ({stress_corr['strength']})")
+            elif stress_corr["correlation"] == "negative":
+                findings.append(f"Higher stress is associated with lower glucose levels ({stress_corr['strength']})")
 
-        # Build response
-        response = {
-            "patient_id": patient_id,
-            "analysis": {
-                "stress": stress_analysis,
-                "sleep": sleep_analysis,
-                "activity": activity_analysis
-            },
-            "overall_association": overall["overall_association"],
-            "pattern_count": overall["pattern_summary"],
-            "patterns": overall["patterns"],
-            "concerns": overall["concerns"],
-            "message": f"Correlation analysis complete. {overall['overall_association']}"
-        }
+        if sleep_corr.get("status") == "ok":
+            if sleep_corr["correlation"] == "positive":
+                findings.append(f"More sleep is associated with higher glucose levels ({sleep_corr['strength']})")
+            elif sleep_corr["correlation"] == "negative":
+                findings.append(f"Less sleep is associated with higher glucose levels ({sleep_corr['strength']})")
 
-        return json.dumps(response)
+        if activity_corr.get("status") == "ok":
+            if activity_corr["correlation"] == "positive":
+                findings.append(f"More activity is associated with higher glucose levels ({activity_corr['strength']})")
+            elif activity_corr["correlation"] == "negative":
+                findings.append(f"More activity is associated with lower glucose levels ({activity_corr['strength']})")
+
+        if not findings:
+            return "Insufficient data to identify clear correlations with glucose"
+
+        return " | ".join(findings)
 
     async def _arun(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
                    from_date: Optional[str] = None, to_date: Optional[str] = None,
