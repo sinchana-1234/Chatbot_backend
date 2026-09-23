@@ -2,12 +2,13 @@
 """
 Correlation Analysis Tool for Revival Medical System
 
-Analyzes how stress, sleep, and activity CORRELATE WITH patient's glucose patterns.
+Analyzes how stress, sleep, and activity correlate WITH patient's glucose patterns.
+Uses _fetch() with proper auth token, cycle window, and date resolution.
 """
 
 import json
 import logging
-from typing import Optional
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 from langchain.tools import BaseTool
 from dal.database import DatabaseManager
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class CorrelationAnalysisTool(BaseTool):
-    """Analyzes correlations between stress/sleep/activity and glucose patterns"""
+    """Analyzes correlations between lifestyle factors and glucose"""
 
     name: str = "analyze_glucose_correlations"
     description: str = """Analyze how stress, sleep, and activity correlate with a patient's glucose patterns.
@@ -29,17 +30,16 @@ class CorrelationAnalysisTool(BaseTool):
     - period (str): OPTIONAL relative phrase, e.g. 'last 30 days', 'this month'
 
     Returns: Correlation analysis showing:
-    - How stress levels correlate with glucose (positive/negative/none)
-    - How sleep duration correlates with glucose (positive/negative/none)
-    - How activity levels correlate with glucose (positive/negative/none)
-    - Overall pattern: which factor has strongest impact on glucose
-    - Actionable insights based on correlations
+    - How stress levels correlate with glucose (positive/negative/weak)
+    - How sleep duration correlates with glucose (positive/negative/weak)
+    - How activity levels correlate with glucose (positive/negative/weak)
+    - Which factor has strongest impact on glucose
+    - Actionable insights based on data patterns
 
     Use for questions like:
     - "How does activity affect this patient's glucose?"
     - "How do sleep and stress relate to glucose?"
     - "What lifestyle factor impacts glucose the most?"
-    - "Are there patterns between activity and glucose spikes?"
     """
 
     def __init__(self):
@@ -48,7 +48,7 @@ class CorrelationAnalysisTool(BaseTool):
     def set_user_context(self, user_context):
         object.__setattr__(self, 'user_context', user_context)
 
-    def _resolve_patient_id(self, patient_id: Optional[int], patient_name: Optional[str]) -> tuple:
+    def _resolve_patient_id(self, patient_id: Optional[int], patient_name: Optional[str]) -> Tuple[Optional[int], Optional[str]]:
         """Resolve patient name to ID if needed"""
         if patient_id:
             return patient_id, None
@@ -60,77 +60,169 @@ class CorrelationAnalysisTool(BaseTool):
 
         user_context = getattr(self, 'user_context', None)
 
-        with DatabaseManager() as db_manager:
-            doctor_id = user_context.get('user_id') if user_context else None
-            own_patients = db_manager.get_doctor_patients(doctor_user_id=doctor_id) if doctor_id else []
-            own_matching = [
-                p for p in own_patients
-                if patient_name.lower() in f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".lower()
-            ]
+        try:
+            with DatabaseManager() as db_manager:
+                doctor_id = user_context.get('user_id') if user_context else None
+                own_patients = db_manager.get_doctor_patients(doctor_user_id=doctor_id) if doctor_id else []
+                own_matching = [
+                    p for p in own_patients
+                    if patient_name.lower() in f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".lower()
+                ]
 
-            if own_matching:
-                if len(own_matching) > 1:
+                if own_matching:
+                    if len(own_matching) > 1:
+                        return None, json.dumps({
+                            "status": "ambiguous_name",
+                            "notice": f"Multiple patients match '{patient_name}'. Ask the user which one.",
+                            "matching_patients": [
+                                {"id": p["patient_id"], "name": f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".strip()}
+                                for p in own_matching
+                            ]
+                        })
+                    return own_matching[0]["patient_id"], None
+
+                users = db_manager.get_users()
+                matching_users = [
+                    u for u in users
+                    if patient_name.lower() in f"{u.first_name or ''} {u.last_name or ''}".lower()
+                    and u.role_id == 1
+                ]
+
+                if not matching_users:
+                    return None, json.dumps({"status": "not_found", "notice": f"No patient found with name containing '{patient_name}'."})
+
+                if len(matching_users) > 1:
                     return None, json.dumps({
                         "status": "ambiguous_name",
-                        "notice": f"Multiple patients match '{patient_name}'. Ask the user which one.",
+                        "notice": f"Multiple patients match '{patient_name}'.",
                         "matching_patients": [
-                            {
-                                "id": p["patient_id"],
-                                "name": f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".strip(),
-                                "email": p.get("patient_email")
-                            } for p in own_matching
+                            {"id": u.id, "name": f"{u.first_name or ''} {u.last_name or ''}".strip()}
+                            for u in matching_users
                         ]
                     })
-                return own_matching[0]["patient_id"], None
 
-            users = db_manager.get_users()
-            matching_users = [
-                u for u in users
-                if patient_name.lower() in f"{u.first_name or ''} {u.last_name or ''}".lower()
-                and u.role_id == 1
-            ]
+                return matching_users[0].id, None
+        except Exception as e:
+            logger.error(f"Error resolving patient: {e}")
+            return None, json.dumps({"error": f"Failed to resolve patient: {str(e)}"})
 
-            if not matching_users:
-                return None, json.dumps({
-                    "status": "not_found",
-                    "notice": f"No patient found with name containing '{patient_name}'."
-                })
+    def _fetch_all_data(self, patient_id: int, from_date: Optional[str] = None,
+                        to_date: Optional[str] = None, period: Optional[str] = None) -> Dict:
+        """Fetch all per-day data via the trend tool's _fetch, with the SAME
+        auth-token and cycle-window resolution _run_for_metric uses."""
+        try:
+            from tools.health_progress_tool import GlucoseTrendTool
+            from dal.postgres_db import resolve_range
+            from config import settings
 
-            if len(matching_users) > 1:
-                return None, json.dumps({
-                    "status": "ambiguous_name",
-                    "notice": f"Multiple patients match '{patient_name}'. Ask the user which one.",
-                    "matching_patients": [
-                        {
-                            "id": u.id,
-                            "name": f"{u.first_name or ''} {u.last_name or ''}".strip(),
-                            "email": u.email
-                        } for u in matching_users
-                    ]
-                })
+            tool = GlucoseTrendTool()
+            user_context = getattr(self, 'user_context', None)
+            if user_context and hasattr(tool, 'set_user_context'):
+                tool.set_user_context(user_context)
 
-            return matching_users[0].id, None
+            # 1. Auth token — same source as _run_for_metric (line 587)
+            auth_token = (user_context.get('auth_token') or user_context.get('token')) if user_context else None
+            if not auth_token:
+                logger.error("No auth token found in user context")
+                return {}
 
-    def _calculate_correlation(self, factor_values: list, glucose_values: list) -> dict:
+            # 2. Date window — explicit dates win; else current cycle; else wide floor
+            start, end, _ = resolve_range(from_date, to_date, period)
+            if not start:
+                cyc = tool._cycle_window(patient_id)
+                if cyc:
+                    start, end = cyc
+                else:
+                    end = datetime.now().strftime("%Y-%m-%d")
+                    start = (datetime.now()
+                             - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)
+                             ).strftime("%Y-%m-%d")
+
+            logger.debug(f"Fetching correlation data for patient {patient_id} from {start} to {end}")
+            return tool._fetch(patient_id, start, end, auth_token)
+        except Exception as e:
+            logger.error(f"Error fetching data: {e}")
+            return {}
+
+    def _extract_daily_series(self, data: Dict) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float], Dict[str, float]]:
         """
-        Calculate simple correlation between a lifestyle factor and glucose
-        Returns: correlation strength (positive/negative/none) and strength value
+        Extract per-day series from raw fetch data
+        Returns: (daily_glucose, daily_stress, daily_sleep, daily_activity)
         """
-        if len(factor_values) < 2 or len(glucose_values) < 2:
+        daily_glucose = {}
+        daily_stress = {}
+        daily_sleep = {}
+        daily_activity = {}
+
+        try:
+            # Extract glucose: glucoseDailyAnalytics has glucoseDate and meanGlucose
+            if "glucoseDailyAnalytics" in data and isinstance(data["glucoseDailyAnalytics"], list):
+                for day in data["glucoseDailyAnalytics"]:
+                    date_key = day.get("glucoseDate", "")[:10]  # YYYY-MM-DD
+                    glucose_val = day.get("meanGlucose")
+                    if date_key and glucose_val is not None:
+                        daily_glucose[date_key] = float(glucose_val)
+
+            # Extract stress: stress list has readingDate and average
+            if "stress" in data and isinstance(data["stress"], list):
+                for day in data["stress"]:
+                    date_key = day.get("readingDate", "")[:10]  # YYYY-MM-DD
+                    stress_val = day.get("average")
+                    if date_key and stress_val is not None:
+                        daily_stress[date_key] = float(stress_val)
+
+            # Extract sleep: sleep list has readingDate and sleep stage minutes
+            if "sleep" in data and isinstance(data["sleep"], list):
+                for day in data["sleep"]:
+                    date_key = day.get("readingDate", "")[:10]  # YYYY-MM-DD
+                    deep = day.get("deepSleep", 0) or 0
+                    light = day.get("lightSleep", 0) or 0
+                    rem = day.get("remSleep", 0) or 0
+                    total_mins = deep + light + rem
+                    if date_key and total_mins > 0:
+                        daily_sleep[date_key] = total_mins / 60.0  # Convert to hours
+
+            # Extract activity: activity list has readingDate and totalSteps
+            if "activity" in data and isinstance(data["activity"], list):
+                for day in data["activity"]:
+                    date_key = day.get("readingDate", "")[:10]  # YYYY-MM-DD
+                    steps = day.get("totalSteps")
+                    if date_key and steps is not None:
+                        daily_activity[date_key] = float(steps)
+
+        except Exception as e:
+            logger.error(f"Error extracting daily series: {e}")
+
+        return daily_glucose, daily_stress, daily_sleep, daily_activity
+
+    def _calculate_correlation(self, factor_values: List[float], glucose_values: List[float]) -> Dict:
+        """
+        Calculate Pearson correlation between factor and glucose
+        Minimum 10 paired days required for medical significance
+        """
+        if len(factor_values) < 10:
             return {
                 "status": "insufficient_data",
                 "correlation": "unknown",
                 "strength": None,
-                "message": "Not enough data points to calculate correlation"
+                "message": f"Only {len(factor_values)} paired days. Need at least 10 for reliable correlation."
             }
 
-        # Simple correlation: if factor goes up, does glucose go up too?
-        factor_avg = sum(factor_values) / len(factor_values)
-        glucose_avg = sum(glucose_values) / len(glucose_values)
+        if len(factor_values) != len(glucose_values):
+            return {
+                "status": "error",
+                "correlation": "unknown",
+                "strength": None,
+                "message": "Mismatched data lengths"
+            }
 
-        numerator = sum((f - factor_avg) * (g - glucose_avg) for f, g in zip(factor_values, glucose_values))
-        factor_variance = sum((f - factor_avg) ** 2 for f in factor_values)
-        glucose_variance = sum((g - glucose_avg) ** 2 for g in glucose_values)
+        # Calculate Pearson correlation coefficient
+        factor_mean = sum(factor_values) / len(factor_values)
+        glucose_mean = sum(glucose_values) / len(glucose_values)
+
+        numerator = sum((f - factor_mean) * (g - glucose_mean) for f, g in zip(factor_values, glucose_values))
+        factor_variance = sum((f - factor_mean) ** 2 for f in factor_values)
+        glucose_variance = sum((g - glucose_mean) ** 2 for g in glucose_values)
 
         if factor_variance == 0 or glucose_variance == 0:
             return {
@@ -141,112 +233,38 @@ class CorrelationAnalysisTool(BaseTool):
             }
 
         correlation = numerator / (factor_variance * glucose_variance) ** 0.5
+        correlation = round(correlation, 2)
 
-        if correlation > 0.3:
+        # Classify correlation
+        if correlation > 0.4:
             corr_type = "positive"
-            interpretation = "higher factor values tend to associate with higher glucose"
-        elif correlation < -0.3:
+            strength_desc = "strong positive"
+            interpretation = "higher values tend to associate with higher glucose"
+        elif correlation > 0.2:
+            corr_type = "positive"
+            strength_desc = "moderate positive"
+            interpretation = "higher values show some association with higher glucose"
+        elif correlation < -0.4:
             corr_type = "negative"
-            interpretation = "higher factor values tend to associate with lower glucose"
+            strength_desc = "strong negative"
+            interpretation = "higher values tend to associate with lower glucose"
+        elif correlation < -0.2:
+            corr_type = "negative"
+            strength_desc = "moderate negative"
+            interpretation = "higher values show some association with lower glucose"
         else:
-            corr_type = "weak/none"
+            corr_type = "weak"
+            strength_desc = "weak"
             interpretation = "little to no clear relationship"
 
         return {
             "status": "ok",
             "correlation": corr_type,
-            "strength": round(correlation, 2),
+            "strength": correlation,
+            "strength_desc": strength_desc,
             "interpretation": interpretation,
             "data_points": len(factor_values)
         }
-
-    def _get_glucose_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
-        """Fetch glucose readings for the patient"""
-        try:
-            with DatabaseManager() as db_manager:
-                query = "SELECT reading_value, reading_date FROM patient_glucose_readings WHERE patient_id = %s"
-                params = [patient_id]
-
-                if from_date:
-                    query += " AND reading_date >= %s"
-                    params.append(from_date)
-                if to_date:
-                    query += " AND reading_date <= %s"
-                    params.append(to_date)
-
-                query += " ORDER BY reading_date"
-
-                results = db_manager.execute_query(query, params)
-                return results if results else []
-        except Exception as e:
-            logger.error(f"Error fetching glucose data: {e}")
-            return []
-
-    def _get_stress_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
-        """Fetch stress readings for the patient"""
-        try:
-            with DatabaseManager() as db_manager:
-                query = "SELECT stress_percentage, reading_date FROM patient_stress_hrv WHERE patient_id = %s"
-                params = [patient_id]
-
-                if from_date:
-                    query += " AND reading_date >= %s"
-                    params.append(from_date)
-                if to_date:
-                    query += " AND reading_date <= %s"
-                    params.append(to_date)
-
-                query += " ORDER BY reading_date"
-
-                results = db_manager.execute_query(query, params)
-                return results if results else []
-        except Exception as e:
-            logger.error(f"Error fetching stress data: {e}")
-            return []
-
-    def _get_sleep_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
-        """Fetch sleep duration for the patient"""
-        try:
-            with DatabaseManager() as db_manager:
-                query = "SELECT (deep_sleep_mins + light_sleep_mins) / 60.0 as sleep_hours, reading_date FROM patient_sleep WHERE patient_id = %s"
-                params = [patient_id]
-
-                if from_date:
-                    query += " AND reading_date >= %s"
-                    params.append(from_date)
-                if to_date:
-                    query += " AND reading_date <= %s"
-                    params.append(to_date)
-
-                query += " ORDER BY reading_date"
-
-                results = db_manager.execute_query(query, params)
-                return results if results else []
-        except Exception as e:
-            logger.error(f"Error fetching sleep data: {e}")
-            return []
-
-    def _get_activity_data(self, patient_id: int, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list:
-        """Fetch activity (steps) for the patient"""
-        try:
-            with DatabaseManager() as db_manager:
-                query = "SELECT steps, activity_date FROM patient_activity WHERE patient_id = %s"
-                params = [patient_id]
-
-                if from_date:
-                    query += " AND activity_date >= %s"
-                    params.append(from_date)
-                if to_date:
-                    query += " AND activity_date <= %s"
-                    params.append(to_date)
-
-                query += " ORDER BY activity_date"
-
-                results = db_manager.execute_query(query, params)
-                return results if results else []
-        except Exception as e:
-            logger.error(f"Error fetching activity data: {e}")
-            return []
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
              from_date: Optional[str] = None, to_date: Optional[str] = None,
@@ -258,74 +276,48 @@ class CorrelationAnalysisTool(BaseTool):
             return resolution_error
 
         try:
-            # Fetch all data
-            glucose_data = self._get_glucose_data(patient_id, from_date, to_date)
-            stress_data = self._get_stress_data(patient_id, from_date, to_date)
-            sleep_data = self._get_sleep_data(patient_id, from_date, to_date)
-            activity_data = self._get_activity_data(patient_id, from_date, to_date)
+            # Fetch all per-day data in one call with proper auth and cycle window
+            data = self._fetch_all_data(patient_id, from_date, to_date, period)
 
-            if not glucose_data:
+            if not data:
+                return json.dumps({
+                    "error": "Failed to fetch data for this patient",
+                    "patient_id": patient_id
+                })
+
+            # Extract daily series
+            daily_glucose, daily_stress, daily_sleep, daily_activity = self._extract_daily_series(data)
+
+            if not daily_glucose:
                 return json.dumps({
                     "error": "No glucose data found for this patient in the specified period",
                     "patient_id": patient_id
                 })
 
-            # Align dates for correlation (same dates across all datasets)
-            glucose_dict = {str(g[1]): g[0] for g in glucose_data}
-            stress_dict = {str(s[1]): s[0] for s in stress_data}
-            sleep_dict = {str(s[1]): s[0] for s in sleep_data}
-            activity_dict = {str(a[1]): a[0] for a in activity_data}
+            # Calculate correlations independently (each factor intersects with glucose separately)
+            stress_correlation = self._correlate_independently(daily_stress, daily_glucose, "stress")
+            sleep_correlation = self._correlate_independently(daily_sleep, daily_glucose, "sleep")
+            activity_correlation = self._correlate_independently(daily_activity, daily_glucose, "activity")
 
-            # Find common dates
-            common_dates = set(glucose_dict.keys())
-            if stress_data:
-                common_dates &= set(stress_dict.keys())
-            if sleep_data:
-                common_dates &= set(sleep_dict.keys())
-            if activity_data:
-                common_dates &= set(activity_dict.keys())
-
-            common_dates = sorted(list(common_dates))
-
-            if not common_dates:
-                return json.dumps({
-                    "error": "No overlapping dates found between glucose and lifestyle data",
-                    "patient_id": patient_id,
-                    "message": "Need data on the same dates to calculate correlations"
-                })
-
-            # Extract aligned values
-            glucose_values = [glucose_dict[d] for d in common_dates]
-            stress_values = [stress_dict.get(d, None) for d in common_dates]
-            sleep_values = [sleep_dict.get(d, None) for d in common_dates]
-            activity_values = [activity_dict.get(d, None) for d in common_dates]
-
-            # Calculate correlations
-            stress_correlation = self._calculate_correlation(
-                [s for s in stress_values if s is not None],
-                [glucose_dict[common_dates[i]] for i, s in enumerate(stress_values) if s is not None]
-            ) if any(s is not None for s in stress_values) else {"status": "no_data", "correlation": "unknown"}
-
-            sleep_correlation = self._calculate_correlation(
-                [s for s in sleep_values if s is not None],
-                [glucose_dict[common_dates[i]] for i, s in enumerate(sleep_values) if s is not None]
-            ) if any(s is not None for s in sleep_values) else {"status": "no_data", "correlation": "unknown"}
-
-            activity_correlation = self._calculate_correlation(
-                [a for a in activity_values if a is not None],
-                [glucose_dict[common_dates[i]] for i, a in enumerate(activity_values) if a is not None]
-            ) if any(a is not None for a in activity_values) else {"status": "no_data", "correlation": "unknown"}
+            # Find strongest correlation
+            correlations = [
+                ("stress", stress_correlation),
+                ("sleep", sleep_correlation),
+                ("activity", activity_correlation)
+            ]
+            valid_correlations = [(name, corr) for name, corr in correlations if corr.get("status") == "ok"]
+            strongest = max(valid_correlations, key=lambda x: abs(x[1]["strength"]))[0] if valid_correlations else None
 
             # Build response
             response = {
                 "patient_id": patient_id,
-                "period_analyzed": f"{common_dates[0]} to {common_dates[-1]}" if common_dates else "N/A",
-                "data_points_aligned": len(common_dates),
+                "period": f"{from_date} to {to_date}" if from_date and to_date else "All available data",
                 "correlations": {
                     "stress_vs_glucose": stress_correlation,
                     "sleep_vs_glucose": sleep_correlation,
                     "activity_vs_glucose": activity_correlation
                 },
+                "strongest_factor": strongest,
                 "summary": self._generate_summary(stress_correlation, sleep_correlation, activity_correlation),
                 "message": "Correlation analysis complete"
             }
@@ -339,30 +331,46 @@ class CorrelationAnalysisTool(BaseTool):
                 "patient_id": patient_id
             })
 
-    def _generate_summary(self, stress_corr: dict, sleep_corr: dict, activity_corr: dict) -> str:
-        """Generate human-readable summary of correlations"""
+    def _correlate_independently(self, factor_data: Dict[str, float], glucose_data: Dict[str, float], factor_name: str) -> Dict:
+        """Correlate one factor with glucose on their shared dates"""
+        if not factor_data:
+            return {
+                "status": "no_data",
+                "correlation": "unknown",
+                "message": f"No {factor_name} data available"
+            }
+
+        # Find common dates between this factor and glucose
+        common_dates = set(factor_data.keys()) & set(glucose_data.keys())
+
+        if not common_dates:
+            return {
+                "status": "no_overlap",
+                "correlation": "unknown",
+                "message": f"No overlapping dates between {factor_name} and glucose"
+            }
+
+        # Extract paired values
+        factor_values = [factor_data[d] for d in sorted(common_dates)]
+        glucose_values = [glucose_data[d] for d in sorted(common_dates)]
+
+        return self._calculate_correlation(factor_values, glucose_values)
+
+    def _generate_summary(self, stress_corr: Dict, sleep_corr: Dict, activity_corr: Dict) -> str:
+        """Generate human-readable summary"""
         findings = []
 
         if stress_corr.get("status") == "ok":
-            if stress_corr["correlation"] == "positive":
-                findings.append(f"Higher stress is associated with higher glucose levels ({stress_corr['strength']})")
-            elif stress_corr["correlation"] == "negative":
-                findings.append(f"Higher stress is associated with lower glucose levels ({stress_corr['strength']})")
+            findings.append(f"Stress: {stress_corr['strength_desc']} correlation ({stress_corr['strength']})")
 
         if sleep_corr.get("status") == "ok":
-            if sleep_corr["correlation"] == "positive":
-                findings.append(f"More sleep is associated with higher glucose levels ({sleep_corr['strength']})")
-            elif sleep_corr["correlation"] == "negative":
-                findings.append(f"Less sleep is associated with higher glucose levels ({sleep_corr['strength']})")
+            findings.append(f"Sleep: {sleep_corr['strength_desc']} correlation ({sleep_corr['strength']})")
 
         if activity_corr.get("status") == "ok":
-            if activity_corr["correlation"] == "positive":
-                findings.append(f"More activity is associated with higher glucose levels ({activity_corr['strength']})")
-            elif activity_corr["correlation"] == "negative":
-                findings.append(f"More activity is associated with lower glucose levels ({activity_corr['strength']})")
+            findings.append(f"Activity: {activity_corr['strength_desc']} correlation ({activity_corr['strength']})")
 
         if not findings:
-            return "Insufficient data to identify clear correlations with glucose"
+            return "Insufficient overlapping data to identify correlations"
 
         return " | ".join(findings)
 
