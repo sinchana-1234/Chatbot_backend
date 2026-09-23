@@ -50,9 +50,10 @@ class Settings(BaseSettings):
 
     # Glucose interpretation thresholds (mg/dL) for the patient-summary tool.
     # Single source of truth — the tool reads these instead of hardcoding numbers.
-    GLUCOSE_LOW_MGDL: int = 70        # < this  → Low
-    GLUCOSE_ELEVATED_MGDL: int = 140  # > this  → slightly elevated (top of "normal")
-    GLUCOSE_HIGH_MGDL: int = 180      # > this  → High
+    # Bands: Very Low <54 | Low 54–70 | Normal 70–180 | High 180–250 | Very High >250
+    GLUCOSE_LOW_MGDL: int = 70         # < this  → Low
+    GLUCOSE_HIGH_MGDL: int = 180       # > this  → High
+    GLUCOSE_VERY_HIGH_MGDL: int = 250  # > this  → Very High
 
     model_config = SettingsConfigDict(
         env_file=".env",

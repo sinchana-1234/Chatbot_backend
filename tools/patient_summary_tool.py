@@ -86,7 +86,7 @@ class PatientSummaryTool(BaseTool):
             return "⚪", "No Data Available", "No readings were recorded for this period."
 
         issues = 0
-        if glucose and (glucose > settings.GLUCOSE_ELEVATED_MGDL or glucose < settings.GLUCOSE_LOW_MGDL):
+        if glucose and (glucose > settings.GLUCOSE_HIGH_MGDL or glucose < settings.GLUCOSE_LOW_MGDL):
             issues += 1
         if bp and "/" in str(bp):
             try:
@@ -116,13 +116,13 @@ class PatientSummaryTool(BaseTool):
         mild = []
 
         if glucose:
-            _normal = f"{settings.GLUCOSE_LOW_MGDL}–{settings.GLUCOSE_ELEVATED_MGDL}"
-            if glucose > settings.GLUCOSE_HIGH_MGDL:
+            _normal = f"{settings.GLUCOSE_LOW_MGDL}–{settings.GLUCOSE_HIGH_MGDL}"
+            if glucose > settings.GLUCOSE_VERY_HIGH_MGDL:
+                severe.append(f"Glucose is very high at {fmt(glucose, 'mg/dL')} (normal: {_normal}). Consult your doctor.")
+            elif glucose > settings.GLUCOSE_HIGH_MGDL:
                 severe.append(f"Glucose is high at {fmt(glucose, 'mg/dL')} (normal: {_normal}). Consult your doctor.")
             elif glucose < settings.GLUCOSE_LOW_MGDL:
                 severe.append(f"Glucose is low at {fmt(glucose, 'mg/dL')} (normal: {_normal}). Have a snack and monitor.")
-            elif glucose > settings.GLUCOSE_ELEVATED_MGDL:
-                mild.append(f"Glucose slightly elevated at {fmt(glucose, 'mg/dL')}. A short walk after meals can help.")
 
         if bp and "/" in str(bp):
             try:
