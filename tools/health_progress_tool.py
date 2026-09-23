@@ -239,6 +239,35 @@ class HealthProgressBase(BaseTool):
         except Exception:
             return None
 
+    def _previous_cycle_window(self, patient_id: int, current_from: str):
+        """The started cycle immediately BEFORE current_from ('YYYY-MM-DD'),
+        skipping trivially short (<7 day) cycles. Returns (from, to) or None."""
+        try:
+            with DatabaseManager() as dm:
+                plans = dm.get_user_plans(patient_id=patient_id, active_only=False)
+                cands = []
+                for p in plans:
+                    pf, pt = p.get("from_date"), p.get("to_date")
+                    if not pf or not pt:
+                        continue
+                    pf, pt = pf[:10], pt[:10]
+                    if pf >= current_from:          # not before the current cycle
+                        continue
+                    try:                            # skip 1-day/blip cycles
+                        span = (datetime.strptime(pt, "%Y-%m-%d")
+                                - datetime.strptime(pf, "%Y-%m-%d")).days
+                    except Exception:
+                        continue
+                    if span < 7:
+                        continue
+                    cands.append((pf, pt))
+                if not cands:
+                    return None
+                cands.sort(reverse=True)            # most recent one before current
+                return cands[0]
+        except Exception:
+            return None
+
     def _build_chart(self, metric: str, glucose_daily: list, data: dict, from_date: str, to_date: str) -> dict:
         if metric == "hba1c":
             valid = [d for d in glucose_daily if d.get("estimatedHba1c") is not None]
@@ -538,17 +567,16 @@ class HealthProgressBase(BaseTool):
         # nothing is specified we analyse ALL available history. The API is a
         # /{from}/{to} path (it can't take "unbounded"), so all-history is a wide
         # floor window; the response still states the actual dates covered.
+        used_cycle = False
+        cycle_from = None
         start, end, period_label = resolve_range(from_date, to_date, period)
         if start:
             from_date, to_date = start, end
         else:
-            # No explicit range → default to the patient's CURRENT program cycle
-            # (active plan), or their most recent past cycle if none is active.
-            # Only if they have no dated plan at all do we fall back to the wide
-            # all-history window.
             cycle = self._cycle_window(patient_id)
             if cycle:
                 from_date, to_date = cycle
+                used_cycle, cycle_from = True, cycle[0]
             else:
                 to_date = datetime.now().strftime("%Y-%m-%d")
                 from_date = (datetime.now()
@@ -721,6 +749,15 @@ class HealthProgressBase(BaseTool):
             # as the response, so the model cannot re-bullet it.
             if user_context is not None:
                 user_context['_last_glucose_trend_text'] = glucose_prose
+                # Only when the window came from the CURRENT cycle, offer a
+                # one-click jump to the previous cycle.
+                if used_cycle and cycle_from:
+                    prev = self._previous_cycle_window(patient_id, cycle_from)
+                    if prev:
+                        user_context['_last_suggestions'] = [{
+                            "label": "Want a previous cycle?",
+                            "query": f"glucose trend from {prev[0]} to {prev[1]}",
+                        }]
             return glucose_prose
         else:
             base_payload.update({

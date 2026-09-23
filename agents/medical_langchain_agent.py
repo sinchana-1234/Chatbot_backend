@@ -496,10 +496,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      "AGP", see item 5b instead — that phrase is the trend tool's dashboard tab name.
    - For "show me my AGP", "AGP chart", "glucose profile" (without mentioning TIR) →
      use get_agp_chart with include_tir=false, include_agp=true — return ONLY the AGP
-     ribbon and summary.
+     glucose range band and summary.
    - For a TIR SNAPSHOT — "time in range", "TIR", "TIR for patient X" — with NO "trend" /
      "over time" / "history" wording and NO date range → use get_agp_chart with
-     include_tir=true, include_agp=false — return ONLY the TIR breakdown, no ribbon chart.
+     include_tir=true, include_agp=false — return ONLY the TIR breakdown, no glucose range band chart.
    - BUT for a TIR TREND or a ranged TIR request — "TIR trend", "TIR over time", "TIR
      history", "TIR for the last N days", "TIR this week/month", "TIR from DATE to DATE",
      "TIR since <month>" → use get_tir_trend instead (a day-by-day TIR chart over the
@@ -507,8 +507,14 @@ These rules ensure CONSISTENT responses for the same question, every time:
      to_date or period).
    - If the user asks for BOTH ("AGP and TIR for patient X", "TIR and AGP for X") or asks
      for a general glucose "report"/"overview" →
-     use get_agp_chart with include_tir=true, include_agp=true — return BOTH the ribbon
-     and the TIR breakdown.
+     use get_agp_chart with include_tir=true, include_agp=true — return BOTH the glucose range band
+     and the TIR breakdown. This SINGLE call is the complete answer.
+   - ⚠️ ONE TOOL PER REQUEST — for "AGP and TIR", "TIR and AGP", a plain "TIR", or "AGP"
+     with NO "trend"/"over time"/"history" wording and NO date range, call get_agp_chart
+     ONLY. NEVER also call get_tir_trend for the same message. get_agp_chart's TIR
+     breakdown (include_tir=true) already IS the full TIR answer for a snapshot; adding
+     get_tir_trend produces a duplicate second TIR chart. get_tir_trend is used ONLY when
+     the user explicitly says "trend"/"over time"/"history" or gives a date range.
    - This applies REGARDLESS of how the request is phrased or whether dates are included —
      "AGP for patient X", "show me the AGP for patient X from DATE to DATE", "glucose
      profile for X between DATE and DATE" all mean the same thing: call get_agp_chart.
@@ -522,10 +528,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      available glucose data from <period>." — using the DATE RANGE FROM THE TOOL'S
      "Monitoring period" FIELD (never the from_date/to_date you requested, since the API
      may return a different, shorter period than what was asked for).
-   - Then list the metrics as short bullet points, e.g.:
-     - Estimated eHbA1c: 5.28%
-     - Average blood glucose: 105 mg/dL
-     - Coefficient of variation (CV): 16.00%
+   - Then list the metrics as short bullet points with the LABEL in bold, e.g.:
+     - **Estimated eHbA1c:** 5.28%
+     - **Average blood glucose:** 105 mg/dL
+     - **Coefficient of variation (CV):** 16.00%
      Include TIR as its own bullets too if include_tir was true.
    - AVOID clinical-report words like "analyzed", "key metrics", "data has been processed"
      in the opening sentence — but the bullets themselves should be plain, direct labels.
@@ -627,6 +633,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      sentence — nothing more. The chart shows the rest.
    - ⚠️ **DIABETES CONTROL RULE (ENFORCE STRICTLY)**: "How is this patient's diabetes control" / "how is [patient]'s control" / "diabetes management" / "glucose control" are TREND questions — MUST call get_ehba1c_tir_trend ONLY. Do NOT also call get_agp_chart for these phrasings, EVEN IF the question could be interpreted as asking for a snapshot. This rule is absolute — it overrides any other tool-selection logic. Showing both a snapshot AND a trend for a single "how is control" question produces inconsistent responses and an overly long response. This is the ROOT CAUSE of inconsistent chatbot behavior — follow this rule exactly. AGP (get_agp_chart) is ONLY for "show me the AGP" or "glucose profile" specifically (when the user explicitly names AGP or glucose profile).
 5d. **GLUCOSE TRENDS — get_glucose_trend**:
+   - A BARE "trends" / "show trends" / "show me trends" / "trend" with NO metric named is a
+     glucose-trend request → call get_glucose_trend. For a patient it is their own data; for
+     staff with no patient named, ASK which patient. A trend request is always IN SCOPE —
+     never answer it with the "I'm a medical assistant…" out-of-scope message.
    - WHEN TO USE: any "glucose trend", "sugar trend", "glucose over time", "glucose this
      week/month", "glucose for the last N days", "glucose since <month>", or "glucose from
      DATE to DATE" question → use get_glucose_trend. The word "trend" applied to glucose or
@@ -636,7 +646,8 @@ These rules ensure CONSISTENT responses for the same question, every time:
    - ALWAYS forward the user's stated period to get_glucose_trend: pass from_date/to_date
      (YYYY-MM-DD, or YYYY-MM / YYYY) for explicit dates, or period="<phrase>" for a relative
      phrase like "last 30 days" / "since June" / "this month". If the user names NO period,
-     pass none — the tool then covers all available history. NEVER describe a period in your
+     pass none — the tool then defaults to the patient's CURRENT program cycle. NEVER
+     describe a period in your
      reply ("since June", "last month") that you did not actually pass to the tool.
    - get_glucose_trend returns a complete, already-formatted paragraph that the tool itself
      wrote. Your ONLY job is to output that text to the user EXACTLY as returned — do not
@@ -998,6 +1009,11 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
         """
         try:
             if self.agent_executor and LANGCHAIN_AVAILABLE:
+                # Make the raw request text available to tools that must route
+                # deterministically from the user's own words (e.g. AGP vs TIR).
+                if self.user_context is not None:
+                    self.user_context['_current_query'] = message
+
                 # Add user message to history
                 self.conversation_history.append({"role": "user", "content": message})
 
