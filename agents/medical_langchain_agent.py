@@ -184,6 +184,27 @@ your own memory of prior conversations.
 
 {patient_db_info}
 
+⚡ **CRITICAL TOOL SELECTION RULES (DETERMINISTIC - DO NOT DEVIATE):**
+
+These rules ensure CONSISTENT responses for the same question, every time:
+
+1. **"DIABETES CONTROL" / "HOW IS [PATIENT]'S CONTROL" = get_ehba1c_tir_trend ONLY**
+   - Questions like "How is vikas patient's diabetes control?", "how is [patient]'s control", "diabetes management status", "glucose control assessment" are TREND questions
+   - MUST call: get_ehba1c_tir_trend
+   - MUST NOT call: get_agp_chart (even though AGP includes a snapshot)
+   - These questions ask for PROGRESS/TREND comparison (first day vs last day), not a single snapshot
+   - The trend chart shows the patient's glucose CONTROL TRAJECTORY — not a point-in-time AGP profile
+
+2. **"SHOW ME THE AGP" / "GLUCOSE PROFILE" = get_agp_chart ONLY**
+   - Questions like "show me the AGP", "glucose profile", "AGP chart for patient X" are SNAPSHOT questions
+   - MUST call: get_agp_chart with include_tir=false, include_agp=true (or include_tir=true if TIR is also mentioned)
+   - MUST NOT call: get_ehba1c_tir_trend (even though it returns eHbA1c/TIR data)
+   - These questions ask for a SINGLE-PERIOD SNAPSHOT with ribbon chart and percentiles
+
+3. **"TIR TREND" / "TIR OVER TIME" = get_ehba1c_tir_trend for eHbA1c/TIR, OR get_tir_trend for daily TIR**
+   - "TIR trend", "TIR history", "TIR over time", "TIR this week/month" are TREND questions
+   - MUST use the trend version of the tool, NOT the snapshot (get_agp_chart)
+
 🔧 **AVAILABLE TOOLS:**
 
 1. **get_specific_medical_value** - Specific values with time/date filtering
@@ -603,11 +624,10 @@ your own memory of prior conversations.
      section is redundant and must be omitted.
    - Keep the ENTIRE response to the opening sentence + 3 comparison lines + 1 closing
      sentence — nothing more. The chart shows the rest.
-   - "How is this patient's diabetes control" / "how is [patient]'s control" is a TREND
-     question — use ONLY get_ehba1c_tir_trend. Do NOT also call get_agp_chart for this
-     phrasing; showing both a snapshot AND a trend for a single "how is control" question
-     is redundant and produces an overly long response. AGP is only for "show me the AGP"
-     specifically.
+   - ⚠️ **DIABETES CONTROL RULE (ENFORCE STRICTLY)**: "How is this patient's diabetes control" / "how is [patient]'s control" / "diabetes management" / "glucose control" are TREND questions — MUST call get_ehba1c_tir_trend ONLY.
+     Do NOT also call get_agp_chart for these phrasings, EVEN IF the question could be interpreted as asking for a snapshot. 
+     This rule is absolute — it overrides any other tool-selection logic. Showing both a snapshot AND a trend for a single "how is control" question produces inconsistent responses and an overly long response.
+     This is the ROOT CAUSE of inconsistent chatbot behavior — follow this rule exactly. AGP (get_agp_chart) is ONLY for "show me the AGP" or "glucose profile" specifically (when the user explicitly names AGP or glucose profile).
 5d. **GLUCOSE TRENDS — get_glucose_trend**:
    - WHEN TO USE: any "glucose trend", "sugar trend", "glucose over time", "glucose this
      week/month", "glucose for the last N days", "glucose since <month>", or "glucose from
