@@ -495,10 +495,15 @@ These rules ensure CONSISTENT responses for the same question, every time:
      "AGP", see item 5b instead — that phrase is the trend tool's dashboard tab name.
    - For "show me my AGP", "AGP chart", "glucose profile" (without mentioning TIR) →
      use get_agp_chart with include_tir=false, include_agp=true — return ONLY the AGP
-     ribbon and summary.
+     glucose range band and summary.
+   - PLAIN LANGUAGE: when explaining or labeling the AGP graph to the user, call the
+     shaded p10 – p90 area the "glucose range band" (the range the patient's glucose
+     usually stays within through the day) — NOT a "ribbon" or "percentile bands".
+     Call the middle line the "typical (median) glucose line", and describe percentiles
+     simply (e.g. "most days glucose stays below this line") rather than "the 90th percentile".
    - For a TIR SNAPSHOT — "time in range", "TIR", "TIR for patient X" — with NO "trend" /
      "over time" / "history" wording and NO date range → use get_agp_chart with
-     include_tir=true, include_agp=false — return ONLY the TIR breakdown, no ribbon chart.
+     include_tir=true, include_agp=false — return ONLY the TIR breakdown, no glucose range band chart.
    - BUT for a TIR TREND or a ranged TIR request — "TIR trend", "TIR over time", "TIR
      history", "TIR for the last N days", "TIR this week/month", "TIR from DATE to DATE",
      "TIR since <month>" → use get_tir_trend instead (a day-by-day TIR chart over the
@@ -506,8 +511,15 @@ These rules ensure CONSISTENT responses for the same question, every time:
      to_date or period).
    - If the user asks for BOTH ("AGP and TIR for patient X", "TIR and AGP for X") or asks
      for a general glucose "report"/"overview" →
-     use get_agp_chart with include_tir=true, include_agp=true — return BOTH the ribbon
-     and the TIR breakdown.
+     use get_agp_chart with include_tir=true, include_agp=true — return BOTH the glucose range band
+     and the TIR breakdown. This SINGLE call is the complete answer.
+   - ⚠️ ONE TOOL PER REQUEST — for "AGP and TIR", "TIR and AGP", a plain "TIR", or "AGP"
+     with NO "trend"/"over time"/"history" wording and NO date range, call get_agp_chart
+     ONLY. NEVER also call get_tir_trend for the same message. get_agp_chart's TIR
+     breakdown (include_tir=true) already IS the full TIR answer for a snapshot; adding
+     get_tir_trend produces a duplicate second TIR chart (the day-by-day area graph you
+     saw). get_tir_trend is used ONLY when the user explicitly says "trend"/"over time"/
+     "history" or gives a date range.
    - This applies REGARDLESS of how the request is phrased or whether dates are included —
      "AGP for patient X", "show me the AGP for patient X from DATE to DATE", "glucose
      profile for X between DATE and DATE" all mean the same thing: call get_agp_chart.
@@ -521,10 +533,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      available glucose data from <period>." — using the DATE RANGE FROM THE TOOL'S
      "Monitoring period" FIELD (never the from_date/to_date you requested, since the API
      may return a different, shorter period than what was asked for).
-   - Then list the metrics as short bullet points, e.g.:
-     - Estimated eHbA1c: 5.28%
-     - Average blood glucose: 105 mg/dL
-     - Coefficient of variation (CV): 16.00%
+   - Then list the metrics as short bullet points with the LABEL in bold, e.g.:
+     - **Estimated eHbA1c:** 5.28%
+     - **Average blood glucose:** 105 mg/dL
+     - **Coefficient of variation (CV):** 16.00%
      Include TIR as its own bullets too if include_tir was true.
    - AVOID clinical-report words like "analyzed", "key metrics", "data has been processed"
      in the opening sentence — but the bullets themselves should be plain, direct labels.
@@ -968,7 +980,7 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     StressHRVTrendTool(),    # Doctor/DHA: stress/HRV chart
                     HbA1cTrendTool(),        # Doctor/DHA: eHbA1c daily trend chart
                     FBSTrendTool(),          # Doctor/DHA: fasting blood sugar chart
-                    AGPChartTool(),          # Doctor/DHA: AGP ribbon chart / TIR bucket snapshot
+                    AGPChartTool(),          # Doctor/DHA: AGP glucose range band chart / TIR bucket snapshot
                     EHbA1cTIRTool(),         # Doctor/DHA: period-over-period eHbA1c/TIR comparison
                     BPTrendTool(),
                 ]
@@ -996,6 +1008,12 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
         """
         try:
             if self.agent_executor and LANGCHAIN_AVAILABLE:
+                # Make the raw request text available to tools that must route
+                # deterministically from the user's own words (e.g. AGP vs TIR),
+                # instead of relying on the model to pass the right flags.
+                if self.user_context is not None:
+                    self.user_context['_current_query'] = message
+
                 # Add user message to history
                 self.conversation_history.append({"role": "user", "content": message})
                 

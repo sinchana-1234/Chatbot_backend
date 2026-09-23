@@ -6,6 +6,7 @@ uses (forwarding the doctor's own Cognito token). Returns raw percentile
 data (not an image) so the frontend can render an interactive chart."""
 
 import os
+import re
 import json
 import logging
 from typing import Optional
@@ -70,6 +71,17 @@ class AGPChartTool(BaseTool):
              include_tir: bool = False, include_agp: bool = True,
              period: Optional[str] = None) -> str:
         user_context = getattr(self, 'user_context', None)
+
+        # Decide AGP vs TIR from the ACTUAL words in the request, not from the
+        # flags the model guessed. "AGP" -> only AGP, "TIR" -> only TIR, and
+        # asking for both -> both, every time. Only overrides when a keyword is
+        # clearly present; otherwise the model's flags stand.
+        q = ((user_context.get('_current_query') if user_context else '') or '').lower()
+        wants_agp = bool(re.search(r'\bagp\b', q)) or ('glucose profile' in q) or ('ambulatory' in q)
+        wants_tir = bool(re.search(r'\btir\b', q)) or ('time in range' in q) or ('time-in-range' in q)
+        if wants_agp or wants_tir:
+            include_agp = wants_agp
+            include_tir = wants_tir
 
         if user_context and user_context.get('role_id') == 1:
             patient_id = user_context.get('user_id')
@@ -173,6 +185,11 @@ class AGPChartTool(BaseTool):
                 }
 
             actual_period = agp_data["summary"].get("Monitoring period", {}).get("Results", "unknown period")
+            # time_blocks are deliberately NOT returned to the LLM. They are large
+            # (12 blocks × 5 percentiles) and, once in the model's context, it dumps
+            # the whole table into chat even though the chart already shows every
+            # value. The chart receives them via _last_agp_chart_data above; the LLM
+            # only needs the headline summary to write its short reply.
             return json.dumps({
                 "patient_id": patient_id,
                 "requested_from_date": from_date,
@@ -180,13 +197,12 @@ class AGPChartTool(BaseTool):
                 "actual_monitoring_period": actual_period,
                 "summary": agp_data["summary"],
                 "tir": agp_data["tir"] if include_tir else None,
-                "time_blocks": time_blocks,
                 "message": f"Data available for: {actual_period}. "
-                            f"IMPORTANT: use this exact period in your response, "
-                            f"NOT the requested date range. The time_blocks array is "
-                            f"provided so you can answer any follow-up questions about "
-                            f"specific times/values shown in the chart, without needing "
-                            f"to call this tool again."
+                            f"Use THIS exact period in your reply, not the requested "
+                            f"range. Report ONLY the short summary metrics (eHbA1c, "
+                            f"mean glucose, CV, and TIR if provided). The chart already "
+                            f"shows the per-time-of-day values — do NOT list or table "
+                            f"any 00:00 / 02:00 / … percentile values."
             })
 
         except httpx.HTTPStatusError as e:
