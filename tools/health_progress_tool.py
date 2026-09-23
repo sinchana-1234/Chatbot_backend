@@ -598,10 +598,13 @@ class HealthProgressBase(BaseTool):
         metric_notice = None
         chart_data = None
         user_context = getattr(self, 'user_context', None)
+        # Check if chart display should be suppressed (for TIR-only queries without "chart"/"graph" keywords)
+        suppress_chart = getattr(self, '_suppress_chart_display', False)
         if len(glucose_daily) > 1:
             chart_data = self._build_chart(metric, glucose_daily, data, from_date, to_date)
             object.__setattr__(self, 'last_chart_data', chart_data)
-            if user_context is not None and chart_data is not None:
+            # Only store chart data for frontend display if NOT suppressed
+            if user_context is not None and chart_data is not None and not suppress_chart:
                 user_context['_last_trend_chart_data'] = chart_data
             if chart_data is None and metric != "glucose":
                 metric_notice = (

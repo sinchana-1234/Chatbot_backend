@@ -12,6 +12,7 @@ from tools.activity_glucose_tool import ActivityGlucoseImpactTool
 from tools.sleep_glucose_tool import SleepGlucoseImpactTool
 from tools.stress_glucose_tool import StressGlucoseImpactTool
 from tools.lifestyle_glucose_tool import LifestyleGlucoseImpactTool
+from tools.correlation_analysis_tool import CorrelationAnalysisTool
 from tools.health_progress_tool import (
     GlucoseTrendTool, TIRTrendTool, SleepTrendTool,
     ActivityTrendTool, HeartRateTrendTool, StressHRVTrendTool,
@@ -31,7 +32,6 @@ except ImportError as e:
 # Import medical tools
 try:
     from tools import (
-        # MedicalReadingsTool,
         SpecificMedicalValueTool,
         MultiPatientAnalysisTool,
         SimpleMedicalAnalysisTool,
@@ -48,6 +48,7 @@ try:
         AGPChartTool,
         EHbA1cTIRTool,
         BPTrendTool,
+        CorrelationAnalysisTool,
     )
     TOOLS_AVAILABLE = True
 except ImportError as e:
@@ -60,7 +61,7 @@ class MedicalLangChainAgent:
     """
     LangChain-based medical agent with conversation memory
     """
-    
+
     def __init__(self, openai_api_key: str):
         """Initialize LangChain medical agent with tools and conversation tracking"""
         self.openai_api_key = openai_api_key
@@ -68,16 +69,16 @@ class MedicalLangChainAgent:
         self.conversation_history = []  # Simple list to track conversations
         self.tools = []
         self.user_context = None  # Store user context for role-based access
-        
+
         if LANGCHAIN_AVAILABLE and openai_api_key:
             self._setup_langchain_agent()
-    
+
     def _generate_date_context(self) -> str:
         """Generate dynamic date context for the agent prompt"""
         now = datetime.now()
         yesterday = now - timedelta(days=1)
         last_month = now.replace(day=1) - timedelta(days=1)
-        
+
         return f"""**CURRENT DATE CONTEXT - CRITICAL:**
    - Today's date is {now.strftime('%B %d, %Y')}
    - "this month" → "{now.strftime('%Y-%m-01')}" ({now.strftime('%B %Y')})
@@ -92,14 +93,10 @@ class MedicalLangChainAgent:
      assume the year is {now.year} — the current year — never a prior year, even if
      that year seems unfamiliar. Only use a different year if the user states one
      explicitly (e.g. "July 2024")."""
-    
+
     def _setup_langchain_agent(self):
         """Setup LangChain agent with medical tools and memory"""
         try:
-            # Current year for example dates embedded in the prompt below — these
-            # MUST stay dynamic. A hardcoded year (e.g. "2025-07-16") in an example
-            # anchors the model into echoing that literal year for any similarly
-            # shaped query, even when told elsewhere that the current year differs.
             now = datetime.now()
 
             # Initialize OpenAI LLM
@@ -108,15 +105,15 @@ class MedicalLangChainAgent:
                 temperature=0.1,
                 api_key=self.openai_api_key
             )
-            
+
             # Create medical tools
             self.tools = self._create_medical_tools()
 
             print("TOOLS LOADED:", self.tools)
-            
+
             # Generate current date context dynamically
             current_date_context = self._generate_date_context()
-            
+
             # Create agent prompt with role-based instructions
             role_instructions = ""
             if self.user_context:
@@ -146,7 +143,7 @@ get_*_trend tool (get_glucose_trend, get_tir_trend, get_sleep_trend,
 get_activity_trend, get_heart_rate_trend, get_stress_hrv_trend) — never
 get_specific_medical_value for a date range or trend-style question.
 """
-            
+
             # Patient database info - role-based visibility
             patient_db_info = ""
             if self.user_context and self.user_context.get('role_id') == 1:  # Patient role
@@ -176,7 +173,7 @@ your own memory of prior conversations.
 - If you need to see which patients you have access to, use get_doctor_patient_info
   with query_type="my_patients".
 """
-            
+
             prompt = ChatPromptTemplate.from_messages([
                 ("system", f"""You are a medical assistant AI for Revival Hospital. You help healthcare professionals and patients by analyzing medical data and answering questions about patient health records.
 
@@ -201,9 +198,13 @@ These rules ensure CONSISTENT responses for the same question, every time:
    - MUST NOT call: get_ehba1c_tir_trend (even though it returns eHbA1c/TIR data)
    - These questions ask for a SINGLE-PERIOD SNAPSHOT with ribbon chart and percentiles
 
-3. **"TIR TREND" / "TIR OVER TIME" = get_ehba1c_tir_trend for eHbA1c/TIR, OR get_tir_trend for daily TIR**
-   - "TIR trend", "TIR history", "TIR over time", "TIR this week/month" are TREND questions
-   - MUST use the trend version of the tool, NOT the snapshot (get_agp_chart)
+3. **"TIR ONLY" = TEXT SUMMARY ONLY — NO CHART/GRAPH**
+   - Questions like "TIR for patient X", "time in range", "TIR trend for vikas", "what's the TIR" → TEXT ONLY
+   - Do NOT return any visualization/chart/graph unless user explicitly says "show me the TIR graph", "TIR chart", "visualize TIR", "TIR visualization"
+   - Use get_tir_trend or get_agp_chart to fetch the data, but DO NOT include chart in response
+   - Return the text summary (percentages, statistics) — suppress all chart_data, no visualization
+   - ONLY show a graph if the user's question explicitly mentions "chart", "graph", "visualize", or "show me"
+   - **IMPLEMENTATION**: When calling get_tir_trend and NO "chart"/"graph"/"visualize" is in the user's query, set tool._suppress_chart_display = True before calling
 
 🔧 **AVAILABLE TOOLS:**
 
@@ -495,15 +496,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      "AGP", see item 5b instead — that phrase is the trend tool's dashboard tab name.
    - For "show me my AGP", "AGP chart", "glucose profile" (without mentioning TIR) →
      use get_agp_chart with include_tir=false, include_agp=true — return ONLY the AGP
-     glucose range band and summary.
-   - PLAIN LANGUAGE: when explaining or labeling the AGP graph to the user, call the
-     shaded p10 – p90 area the "glucose range band" (the range the patient's glucose
-     usually stays within through the day) — NOT a "ribbon" or "percentile bands".
-     Call the middle line the "typical (median) glucose line", and describe percentiles
-     simply (e.g. "most days glucose stays below this line") rather than "the 90th percentile".
+     ribbon and summary.
    - For a TIR SNAPSHOT — "time in range", "TIR", "TIR for patient X" — with NO "trend" /
      "over time" / "history" wording and NO date range → use get_agp_chart with
-     include_tir=true, include_agp=false — return ONLY the TIR breakdown, no glucose range band chart.
+     include_tir=true, include_agp=false — return ONLY the TIR breakdown, no ribbon chart.
    - BUT for a TIR TREND or a ranged TIR request — "TIR trend", "TIR over time", "TIR
      history", "TIR for the last N days", "TIR this week/month", "TIR from DATE to DATE",
      "TIR since <month>" → use get_tir_trend instead (a day-by-day TIR chart over the
@@ -511,15 +507,8 @@ These rules ensure CONSISTENT responses for the same question, every time:
      to_date or period).
    - If the user asks for BOTH ("AGP and TIR for patient X", "TIR and AGP for X") or asks
      for a general glucose "report"/"overview" →
-     use get_agp_chart with include_tir=true, include_agp=true — return BOTH the glucose range band
-     and the TIR breakdown. This SINGLE call is the complete answer.
-   - ⚠️ ONE TOOL PER REQUEST — for "AGP and TIR", "TIR and AGP", a plain "TIR", or "AGP"
-     with NO "trend"/"over time"/"history" wording and NO date range, call get_agp_chart
-     ONLY. NEVER also call get_tir_trend for the same message. get_agp_chart's TIR
-     breakdown (include_tir=true) already IS the full TIR answer for a snapshot; adding
-     get_tir_trend produces a duplicate second TIR chart (the day-by-day area graph you
-     saw). get_tir_trend is used ONLY when the user explicitly says "trend"/"over time"/
-     "history" or gives a date range.
+     use get_agp_chart with include_tir=true, include_agp=true — return BOTH the ribbon
+     and the TIR breakdown.
    - This applies REGARDLESS of how the request is phrased or whether dates are included —
      "AGP for patient X", "show me the AGP for patient X from DATE to DATE", "glucose
      profile for X between DATE and DATE" all mean the same thing: call get_agp_chart.
@@ -533,10 +522,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      available glucose data from <period>." — using the DATE RANGE FROM THE TOOL'S
      "Monitoring period" FIELD (never the from_date/to_date you requested, since the API
      may return a different, shorter period than what was asked for).
-   - Then list the metrics as short bullet points with the LABEL in bold, e.g.:
-     - **Estimated eHbA1c:** 5.28%
-     - **Average blood glucose:** 105 mg/dL
-     - **Coefficient of variation (CV):** 16.00%
+   - Then list the metrics as short bullet points, e.g.:
+     - Estimated eHbA1c: 5.28%
+     - Average blood glucose: 105 mg/dL
+     - Coefficient of variation (CV): 16.00%
      Include TIR as its own bullets too if include_tir was true.
    - AVOID clinical-report words like "analyzed", "key metrics", "data has been processed"
      in the opening sentence — but the bullets themselves should be plain, direct labels.
@@ -636,10 +625,7 @@ These rules ensure CONSISTENT responses for the same question, every time:
      section is redundant and must be omitted.
    - Keep the ENTIRE response to the opening sentence + 3 comparison lines + 1 closing
      sentence — nothing more. The chart shows the rest.
-   - ⚠️ **DIABETES CONTROL RULE (ENFORCE STRICTLY)**: "How is this patient's diabetes control" / "how is [patient]'s control" / "diabetes management" / "glucose control" are TREND questions — MUST call get_ehba1c_tir_trend ONLY.
-     Do NOT also call get_agp_chart for these phrasings, EVEN IF the question could be interpreted as asking for a snapshot. 
-     This rule is absolute — it overrides any other tool-selection logic. Showing both a snapshot AND a trend for a single "how is control" question produces inconsistent responses and an overly long response.
-     This is the ROOT CAUSE of inconsistent chatbot behavior — follow this rule exactly. AGP (get_agp_chart) is ONLY for "show me the AGP" or "glucose profile" specifically (when the user explicitly names AGP or glucose profile).
+   - ⚠️ **DIABETES CONTROL RULE (ENFORCE STRICTLY)**: "How is this patient's diabetes control" / "how is [patient]'s control" / "diabetes management" / "glucose control" are TREND questions — MUST call get_ehba1c_tir_trend ONLY. Do NOT also call get_agp_chart for these phrasings, EVEN IF the question could be interpreted as asking for a snapshot. This rule is absolute — it overrides any other tool-selection logic. Showing both a snapshot AND a trend for a single "how is control" question produces inconsistent responses and an overly long response. This is the ROOT CAUSE of inconsistent chatbot behavior — follow this rule exactly. AGP (get_agp_chart) is ONLY for "show me the AGP" or "glucose profile" specifically (when the user explicitly names AGP or glucose profile).
 5d. **GLUCOSE TRENDS — get_glucose_trend**:
    - WHEN TO USE: any "glucose trend", "sugar trend", "glucose over time", "glucose this
      week/month", "glucose for the last N days", "glucose since <month>", or "glucose from
@@ -660,7 +646,21 @@ These rules ensure CONSISTENT responses for the same question, every time:
      summaries. Those bullet formats apply ONLY to those tools. get_glucose_trend's
      output is already prose and must be passed through unchanged.
 
-6. **DEVICE QUERIES - SPECIAL HANDLING**:
+6. **GLUCOSE CORRELATION QUERIES - SPECIAL HANDLING**:
+   - For questions about HOW lifestyle factors affect glucose → use analyze_glucose_correlations
+   - Correlation questions include:
+     * "What are this patient's glucose trends?" → analyze_glucose_correlations (not just glucose_trend)
+     * "When does this patient's glucose go high?" → pattern analysis via correlations
+     * "Has this patient had any low glucose episodes?" → pattern analysis via correlations
+     * "How does activity affect this patient's glucose?" → MUST use analyze_glucose_correlations
+     * "How do sleep and stress relate to this patient's glucose?" → MUST use analyze_glucose_correlations
+     * "How has this patient's glucose changed over time?" → use get_glucose_trend (trend data)
+     * "What are the main concerns in this patient's data?" → MUST use analyze_glucose_correlations
+   - The tool returns: favorability of stress/sleep/activity + overall association + concerns
+   - Format response with the Overall Association and concerns, NOT raw numbers
+   - NEVER show raw stress/sleep/activity numbers — show only favorability interpretation
+
+7. **DEVICE QUERIES - SPECIAL HANDLING**:
    - For "When does my CGM expire?", "Is my CGM expired?" → ALWAYS use check_device_status
    - For "How many devices does patient have?" → use check_device_status with check_all_devices=true
    - For "Show all devices for [patient]" → use check_device_status with check_all_devices=true
@@ -670,7 +670,7 @@ These rules ensure CONSISTENT responses for the same question, every time:
    - Returns expiry status (expired/not expired) and device counts
    - NEVER use search_hospital_documents for device expiry queries
 
-7. **NEVER SUBSTITUTE PATIENTS**:
+8. **NEVER SUBSTITUTE PATIENTS**:
    - If a query asks about a SPECIFIC named/identified patient and no data is found
      (or the patient can't be resolved), report exactly that — no data found for
      this patient — and STOP there.
@@ -678,7 +678,7 @@ These rules ensure CONSISTENT responses for the same question, every time:
      existence as a fallback or "context," even in passing. This is a patient-safety
      requirement — the response must be about the requested patient only.
 
-8. **Tool Priority Logic**:
+9. **Tool Priority Logic**:
    - FIRST: Check if query matches patient-specific data tools
    - **NAMED-PATIENT VALUE QUERIES vs MULTI-PATIENT SEARCH**: If the query names a SPECIFIC
      patient (by name or ID) and asks for a value (highest/lowest/specific reading) for THAT
@@ -692,7 +692,7 @@ These rules ensure CONSISTENT responses for the same question, every time:
    - Medical terminology → search_hospital_documents
    - Unknown medical abbreviations → search_hospital_documents
 
-9. **SPECIFIC MEDICAL VALUE QUERIES — SINGULAR VS PLURAL**:
+10. **SPECIFIC MEDICAL VALUE QUERIES — SINGULAR VS PLURAL**:
    - If the user asks for "the highest/lowest [reading]" (singular, one specific value),
      report ONLY that one single value and its time — do NOT list multiple readings.
    - Only show multiple readings if the user explicitly asks for a list, trend, or
@@ -704,7 +704,7 @@ These rules ensure CONSISTENT responses for the same question, every time:
      the average and the low-to-high range, e.g. "averaged 59, ranging 57 to 82" — NOT a
      single value, and never the peak presented as "your level".
 
-9b. **MULTI-PATIENT RESULTS — CLINICAL FORMAT, NOT A DATA DUMP — STRICT, NO EXCEPTIONS**:
+11. **MULTI-PATIENT RESULTS — CLINICAL FORMAT, NOT A DATA DUMP — STRICT, NO EXCEPTIONS**:
    - This rule applies to EVERY response from analyze_multiple_patients, with NO exceptions
      for reading type, threshold value, or how many patients are found. Applies identically
      whether the threshold was the default or a custom_threshold the user specified.
@@ -734,20 +734,20 @@ These rules ensure CONSISTENT responses for the same question, every time:
      "blood pressure above 150"), pass that exact number as custom_threshold — do NOT
      rely on the tool's default clinical threshold in that case.
 
-10. SUMMARY QUERIES - SPECIAL HANDLING (HIGHEST PRIORITY):
+12. **SUMMARY QUERIES - SPECIAL HANDLING (HIGHEST PRIORITY)**:
 
 For ANY summary request, ALWAYS call get_patient_summary with parameters:
 
-    - "give me summary"  
+    - "give me summary"
     → query_type="overall"
 
-    - "today summary"  
+    - "today summary"
     → query_type="daily", date=today
 
-    - "yesterday summary"  
+    - "yesterday summary"
     → query_type="daily", date=yesterday
 
-    - "summary for <date>"  
+    - "summary for <date>"
     → query_type="daily", date="<YYYY-MM-DD>"
 
     🚨 CRITICAL:
@@ -760,7 +760,7 @@ For ANY summary request, ALWAYS call get_patient_summary with parameters:
    never say "name or ID" in a clarification question, since a doctor thinks in patient
    names, not database IDs.
 
-4. **Time & Date Parsing**: 
+4. **Time & Date Parsing**:
    - Parse natural language dates/times into proper formats
    - "16th July 2025" → "2025-07-16" (specific date)
    - "10 AM 16th July 2025" → "2025-07-16 10:00:00" (specific time)
@@ -771,10 +771,10 @@ For ANY summary request, ALWAYS call get_patient_summary with parameters:
      * "this month" → date_filter="{datetime.now().strftime('%Y-%m')}" (MONTH FORMAT)
      * "last month" → date_filter="{(datetime.now().replace(day=1) - timedelta(days=1)).strftime('%Y-%m')}" (MONTH FORMAT)
    - Use YYYY-MM format for month queries, YYYY-MM-DD format for specific dates only
-   
+
    {current_date_context}
 
-5. **Value Interpretation**: 
+5. **Value Interpretation**:
    - Glucose: Normal 70-140 mg/dL, High >180, Low <70
    - Blood Pressure: Normal <120/80, High >140/90
    - Handle pronouns (he/she/they) referring to last mentioned patient
@@ -870,39 +870,36 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                 ("human", "{input}"),
                 MessagesPlaceholder("agent_scratchpad")
             ])
-            
+
             # Create agent
             agent = create_openai_tools_agent(llm, self.tools, prompt)
-            
+
             # Create agent executor
             self.agent_executor = AgentExecutor(
                 agent=agent,
                 tools=self.tools,
                 verbose=True,
-                max_iterations=5,  # Increased from 5 to 10 for better response completeness
+                max_iterations=5,
                 handle_parsing_errors=True,
                 return_intermediate_steps=False,
-                max_execution_time=120  # Increased to 120 seconds for complex protocol queries
+                max_execution_time=120
             )
-            
+
             logger.info("✅ Medical LangChain agent initialized successfully")
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to setup medical LangChain agent: {e}")
             self.agent_executor = None
-    
+
     def set_user_context(self, user_context: Dict[str, Any]):
         """Set user context for role-based access control"""
-        # Skip the expensive tool + executor rebuild if the context is unchanged
         if self.user_context == user_context and self.agent_executor is not None:
             return
         self.user_context = user_context
         logger.info(f"User context set for agent: User {user_context.get('user_id')} (Role: {user_context.get('role_name')})")
-        
-        # Recreate tools with user context
+
         if LANGCHAIN_AVAILABLE and self.openai_api_key:
             self.tools = self._create_medical_tools()
-            # Recreate agent executor with updated tools
             self._setup_langchain_agent()
 
     def _create_medical_tools(self) -> List:
@@ -911,13 +908,11 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
             if not TOOLS_AVAILABLE:
                 logger.warning("⚠️ Medical tools not available")
                 return []
-            
-            # Create working medical tools and inject user context
-            if self.user_context and self.user_context.get('role_id') == 1:  # Patient role
+
+            if self.user_context and self.user_context.get('role_id') == 1:
                 patient_id = self.user_context.get('user_id')
                 logger.info(f"Creating patient-restricted tools for patient ID: {patient_id}")
-                
-                # Create tools and set user context for role-based filtering
+
                 tools = [
                     SpecificMedicalValueTool(),
                     SimpleMedicalAnalysisTool(),
@@ -929,29 +924,26 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     StressGlucoseImpactTool(),
                     LifestyleGlucoseImpactTool(),
                     ProtocolTool(),
-                    PlanTool(),  # Allow patients to view their own plans
-                    DoctorPatientMappingTool(),  # Allow patients to query their doctor details
-                    UserProfileTool(),  # Allow patients to view their own profile
-                    HospitalDocumentSearchTool(),  # Allow general hospital info
-                    DeviceTool(),  # Allow patients to check their device expiry
+                    PlanTool(),
+                    DoctorPatientMappingTool(),
+                    UserProfileTool(),
+                    HospitalDocumentSearchTool(),
+                    DeviceTool(),
                     PatientSummaryTool(),
                     AGPChartTool(),
-                    EHbA1cTIRTool()
+                    EHbA1cTIRTool(),
+                    CorrelationAnalysisTool()
                 ]
-                
-                # Set user context on each tool for role-based access
+
                 for tool in tools:
                     try:
                         if hasattr(tool, 'set_user_context'):
                             tool.set_user_context(self.user_context)
                             logger.debug(f"✅ Set user context on {tool.__class__.__name__}")
-                        else:
-                            logger.debug(f"ℹ️ {tool.__class__.__name__} doesn't support user context")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to set user context on {tool.__class__.__name__}: {e}")
-                
+
             else:
-                # Medical staff - full access to all tools
                 logger.info("Creating full-access tools for medical staff")
                 tools = [
                     SpecificMedicalValueTool(),
@@ -960,70 +952,62 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     HospitalDocumentSearchTool(),
                     MedicationsTool(),
                     FoodlogTool(),
-                    FoodlogUploadersTool(),  # Staff: aggregate 'who uploaded a food log on <date>' across their roster
-                    MealGlucoseImpactTool(),  # meal -> post-meal glucose correlation
-                    ActivityGlucoseImpactTool(),  # daily activity -> glucose dose-response
-                    SleepGlucoseImpactTool(),  # nightly sleep -> next-day glucose
-                    StressGlucoseImpactTool(),  # daily stress -> glucose (median split)
+                    FoodlogUploadersTool(),
+                    MealGlucoseImpactTool(),
+                    ActivityGlucoseImpactTool(),
+                    SleepGlucoseImpactTool(),
+                    StressGlucoseImpactTool(),
                     LifestyleGlucoseImpactTool(),
                     ProtocolTool(),
-                    PlanTool(),  # Staff can view any patient's plans
-                    DoctorPatientMappingTool(),  # Staff can view all doctor-patient mappings
-                    UserProfileTool(),  # Staff can view any patient's profile
-                    DeviceTool() , # Staff can check any patient's device expiry
+                    PlanTool(),
+                    DoctorPatientMappingTool(),
+                    UserProfileTool(),
+                    DeviceTool(),
                     PatientSummaryTool(),
-                    GlucoseTrendTool(),      # Doctor/DHA: glucose trend + chart
-                    TIRTrendTool(),          # Doctor/DHA: day-by-day time-in-range chart
-                    SleepTrendTool(),        # Doctor/DHA: sleep quality chart
-                    ActivityTrendTool(),     # Doctor/DHA: activity/steps chart
-                    HeartRateTrendTool(),    # Doctor/DHA: heart rate chart
-                    StressHRVTrendTool(),    # Doctor/DHA: stress/HRV chart
-                    HbA1cTrendTool(),        # Doctor/DHA: eHbA1c daily trend chart
-                    FBSTrendTool(),          # Doctor/DHA: fasting blood sugar chart
-                    AGPChartTool(),          # Doctor/DHA: AGP glucose range band chart / TIR bucket snapshot
-                    EHbA1cTIRTool(),         # Doctor/DHA: period-over-period eHbA1c/TIR comparison
+                    GlucoseTrendTool(),
+                    TIRTrendTool(),
+                    SleepTrendTool(),
+                    ActivityTrendTool(),
+                    HeartRateTrendTool(),
+                    StressHRVTrendTool(),
+                    HbA1cTrendTool(),
+                    FBSTrendTool(),
+                    AGPChartTool(),
+                    EHbA1cTIRTool(),
                     BPTrendTool(),
+                    CorrelationAnalysisTool(),
                 ]
-                
-                # Set user context on each tool
+
                 for tool in tools:
                     try:
                         if hasattr(tool, 'set_user_context'):
                             tool.set_user_context(self.user_context)
                             logger.debug(f"✅ Set user context on {tool.__class__.__name__}")
-                        else:
-                            logger.debug(f"ℹ️ {tool.__class__.__name__} doesn't support user context")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to set user context on {tool.__class__.__name__}: {e}")
-            
+
             return tools
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to create medical tools: {e}")
             return []
-    
+
     async def chat(self, message: str) -> Dict[str, Any]:
         """
         Process a chat message with automatic tool selection and memory
         """
         try:
             if self.agent_executor and LANGCHAIN_AVAILABLE:
-                # Make the raw request text available to tools that must route
-                # deterministically from the user's own words (e.g. AGP vs TIR),
-                # instead of relying on the model to pass the right flags.
-                if self.user_context is not None:
-                    self.user_context['_current_query'] = message
-
                 # Add user message to history
                 self.conversation_history.append({"role": "user", "content": message})
-                
+
                 # Truncate conversation history to manage tokens
                 truncated_history = self.truncate_conversation_history(
-                    self.conversation_history[:-1],  # Exclude current message
-                    12000,  # max tokens
-                    20      # max messages
+                    self.conversation_history[:-1],
+                    12000,
+                    20
                 )
-                
+
                 # Convert truncated history to LangChain format
                 chat_history = []
                 for msg in truncated_history:
@@ -1031,24 +1015,21 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                         chat_history.append(HumanMessage(content=msg["content"]))
                     elif msg["role"] == "assistant":
                         chat_history.append(AIMessage(content=msg["content"]))
-                
+
                 # Use LangChain agent executor with managed chat history
                 logger.debug(f"🎯 LangChain processing: {message[:100]}...")
                 logger.debug(f"📚 Chat history messages: {len(chat_history)}")
-                
+
                 response = await self.agent_executor.ainvoke({
                     "input": message,
                     "chat_history": chat_history
                 })
-                
+
                 # Add AI response to history
                 if response.get("output"):
                     self.conversation_history.append({"role": "assistant", "content": response["output"]})
-                
-                                # Pick up any chart data a tool stashed on itself during this run
-                # (a LangChain tool can only return text to the LLM, so tools that
-                # produce a chart use this side-channel instead). Cleared after
-                # reading so a stale chart never leaks into a later unrelated answer.
+
+                # Pick up any chart data a tool stashed on itself during this run
                 chart_data = None
                 executor_tools = getattr(self.agent_executor, 'tools', None) or self.tools
                 for tool in executor_tools:
@@ -1056,9 +1037,10 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     if pending is not None:
                         chart_data = pending
                         object.__setattr__(tool, 'last_chart_data', None)
-                        break  # one chart per response — first one found wins
+                        break
 
-                return {
+                # Build response dict
+                result_response = {
                     "message": response["output"],
                     "chart_data": chart_data,
                     "metadata": {
@@ -1066,52 +1048,50 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                         "memory_messages": len(self.conversation_history),
                         "timestamp": datetime.now().isoformat(),
                         "tools_available": len(self.tools),
-                        "response_length": len(response.get("output", ""))
+                        "response_length": len(response.get("output", "")),
                     }
                 }
+
+                return result_response
             else:
-                # No agent available
                 return {
                     "message": "Medical agent not available to process the request.",
                     "metadata": {"error": True}
                 }
-                    
+
         except Exception as e:
             logger.error(f"Medical chat processing failed: {e}")
             return {
                 "message": f"Sorry, I encountered an error: {str(e)}",
                 "metadata": {"error": True}
             }
-    
-    def truncate_conversation_history(self, conversation_history: List[Dict[str, Any]], 
+
+    def truncate_conversation_history(self, conversation_history: List[Dict[str, Any]],
                                     max_tokens: int = 12000,
                                     max_messages: int = 20) -> List[Dict[str, Any]]:
         """Truncate conversation history to stay within token limits"""
         if not conversation_history:
             return []
-        
-        # First, limit by number of messages
+
         if len(conversation_history) > max_messages:
             conversation_history = conversation_history[-max_messages:]
-        
-        # Simple token estimation (4 chars per token)
+
         total_chars = 0
         truncated_history = []
-        
-        # Start from most recent and work backwards
+
         for msg in reversed(conversation_history):
             msg_chars = len(msg.get("content", ""))
-            if total_chars + msg_chars > max_tokens * 4:  # rough estimation
+            if total_chars + msg_chars > max_tokens * 4:
                 break
             total_chars += msg_chars
             truncated_history.insert(0, msg)
-        
+
         return truncated_history
-    
+
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """Get conversation history"""
         return self.conversation_history.copy()
-    
+
     def clear_history(self):
         """Clear conversation history"""
         self.conversation_history.clear()

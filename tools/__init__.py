@@ -19,6 +19,7 @@ from .device_tool import DeviceTool
 from .patient_summary_tool import PatientSummaryTool
 from .agp_chart_tool import AGPChartTool
 from .ehba1c_tir_tool import EHbA1cTIRTool
+from tools.correlation_analysis_tool import CorrelationAnalysisTool
 from .health_progress_tool import (
     GlucoseTrendTool, TIRTrendTool, SleepTrendTool,
     ActivityTrendTool, HeartRateTrendTool, StressHRVTrendTool,
