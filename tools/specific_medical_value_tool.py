@@ -11,6 +11,7 @@ from langchain.tools import BaseTool
 from sqlalchemy import text
 
 from dal.postgres_db import SessionLocalPG
+from dal.cycle_window import cycle_window
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +266,12 @@ class SpecificMedicalValueTool(BaseTool):
                             )
                             sleep_params["date"] = date_filter
                     else:
-                        date_condition = "1=1"
+                        cw = cycle_window(patient_id)
+                        if cw:
+                            date_condition = "DATE(actual_time + INTERVAL '12 hours') BETWEEN :cstart AND :cend"
+                            sleep_params["cstart"], sleep_params["cend"] = cw
+                        else:
+                            date_condition = "1=1"
 
                     sleep_row = db.execute(
                         text(f"""
@@ -345,6 +351,12 @@ class SpecificMedicalValueTool(BaseTool):
 
                 table, column, time_col = mapping[reading_type]
 
+                # Blood pressure stores two paired values on one row. The primary
+                # column (systolic) drives ordering; the secondary (diastolic) is
+                # fetched alongside and shown as "systolic/diastolic", so a BP
+                # reading is never reported as a single number.
+                secondary_col = {"blood_pressure": "diastolic"}.get(reading_type)
+
                 # -------------------------
                 # DATE FILTER
                 # -------------------------
@@ -358,7 +370,14 @@ class SpecificMedicalValueTool(BaseTool):
                         date_condition = f"DATE({time_col}) = :date"
                         params["date"] = date_filter
                 else:
-                    date_condition = "1=1"
+                    # No date given → default to the patient's current program
+                    # cycle. An explicit date_filter above always overrides this.
+                    cw = cycle_window(patient_id)
+                    if cw:
+                        date_condition = f"DATE({time_col}) BETWEEN :cstart AND :cend"
+                        params["cstart"], params["cend"] = cw
+                    else:
+                        date_condition = "1=1"
 
                 # -------------------------
                 # TIME RANGE FILTER
@@ -545,9 +564,10 @@ class SpecificMedicalValueTool(BaseTool):
                     except Exception:
                         target_dt = None
                     if target_dt is not None:
+                        near_select = f"{column}, {secondary_col}, {time_col}" if secondary_col else f"{column}, {time_col}"
                         near = db.execute(
                             text(f"""
-                                SELECT {column}, {time_col}
+                                SELECT {near_select}
                                 FROM {table}
                                 WHERE patient_id = :patient_id
                                 AND {date_condition}
@@ -563,12 +583,20 @@ class SpecificMedicalValueTool(BaseTool):
                                 "patient_id": patient_id,
                                 "note": "Report exactly this — do not substitute or display another patient's data."
                             })
-                        return json.dumps({
-                            "type": "specific",
-                            "reading": {
+                        if secondary_col:
+                            reading = {
+                                "value": f"{int(near[0])}/{int(near[1])}" if near[0] is not None and near[1] is not None else None,
+                                "unit": "mmHg",
+                                "time": str(near[2]),
+                            }
+                        else:
+                            reading = {
                                 "value": float(near[0]) if near[0] is not None else None,
                                 "time": str(near[1]),
                             }
+                        return json.dumps({
+                            "type": "specific",
+                            "reading": reading,
                         }, indent=2)
 
                 # -------------------------
@@ -627,8 +655,9 @@ class SpecificMedicalValueTool(BaseTool):
                 # verify SQL (which uses ORDER BY value, time ASC). For "highest"
                 # (DESC) the earliest occurrence still reads most naturally, so
                 # time stays ASC in both cases.
+                select_cols = f"{column}, {secondary_col}, {time_col}" if secondary_col else f"{column}, {time_col}"
                 query = f"""
-                    SELECT {column}, {time_col}
+                    SELECT {select_cols}
                     FROM {table}
                     WHERE patient_id = :patient_id
                     AND {date_condition}
@@ -649,13 +678,23 @@ class SpecificMedicalValueTool(BaseTool):
                 # -------------------------
                 # FORMAT RESPONSE
                 # -------------------------
-                formatted = [
-                    {
-                        "value": float(r[0]) if r[0] is not None else None,
-                        "time": _friendly_dt(r[1])   # 'July 13, 2026 at 12:00 AM', not '00:00:00'
-                    }
-                    for r in results
-                ]
+                if secondary_col:
+                    formatted = [
+                        {
+                            "value": f"{int(r[0])}/{int(r[1])}" if r[0] is not None and r[1] is not None else None,
+                            "unit": "mmHg",
+                            "time": _friendly_dt(r[2]),
+                        }
+                        for r in results
+                    ]
+                else:
+                    formatted = [
+                        {
+                            "value": float(r[0]) if r[0] is not None else None,
+                            "time": _friendly_dt(r[1])   # 'July 13, 2026 at 12:00 AM', not '00:00:00'
+                        }
+                        for r in results
+                    ]
 
                 # For highest/lowest the answer is ONE reading — the top row after
                 # the ORDER BY. Surface it as a single authoritative field so the
@@ -664,16 +703,24 @@ class SpecificMedicalValueTool(BaseTool):
                 # 70 is the Low<70 cutoff, not a real reading — real min was 51).
                 answer = formatted[0] if formatted else None
 
-                return json.dumps({
-                    "type": analysis_type,
-                    "reading_type": reading_type,
-                    "answer": answer,
-                    "note": (
+                if secondary_col:
+                    note = (
+                        f"The {analysis_type} blood pressure reading is EXACTLY "
+                        f"answer.value (systolic/diastolic, mmHg) at answer.time. "
+                        f"Report that systolic/diastolic pair verbatim."
+                    )
+                else:
+                    note = (
                         f"The {analysis_type} {reading_type} reading is EXACTLY "
                         f"answer.value at answer.time. Report that number verbatim. "
                         f"Do NOT report any normal-range boundary or clinical "
                         f"threshold (e.g. 70/140/180) as the value."
-                    ),
+                    )
+                return json.dumps({
+                    "type": analysis_type,
+                    "reading_type": reading_type,
+                    "answer": answer,
+                    "note": note,
                     "count": len(formatted),
                     "results": formatted
                 }, indent=2)

@@ -210,6 +210,35 @@ class HealthProgressBase(BaseTool):
 
             return matching_users[0].id, None
 
+    def _cycle_window(self, patient_id: int):
+        """The patient's current program cycle as (from_date, to_date), both
+        'YYYY-MM-DD'. Uses the active plan; if none is active, the most recent
+        past plan (previous cycle). Returns None if the patient has no dated
+        plan at all, so the caller can fall back to all-history."""
+        try:
+            with DatabaseManager() as dm:
+                plan = dm.get_current_active_plan(patient_id=patient_id)
+                if not (plan and plan.get("from_date")):
+                    plans = dm.get_user_plans(patient_id=patient_id, active_only=False)
+                    # Never fall back onto a not-yet-started (future) plan — this
+                    # patient has plans dated into 2027. Keep only cycles that have
+                    # already begun, newest first.
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    started = [p for p in plans if p.get("from_date") and p["from_date"][:10] <= today]
+                    plan = started[0] if started else None
+                if not (plan and plan.get("from_date")):
+                    return None
+                today = datetime.now().strftime("%Y-%m-%d")
+                start = plan["from_date"][:10]
+                end = plan["to_date"][:10] if plan.get("to_date") else today
+                # An active plan's to_date is in the future; the API has no data
+                # past today, so never let the window run beyond today.
+                if end > today:
+                    end = today
+                return start, end
+        except Exception:
+            return None
+
     def _build_chart(self, metric: str, glucose_daily: list, data: dict, from_date: str, to_date: str) -> dict:
         if metric == "hba1c":
             valid = [d for d in glucose_daily if d.get("estimatedHba1c") is not None]
@@ -513,10 +542,18 @@ class HealthProgressBase(BaseTool):
         if start:
             from_date, to_date = start, end
         else:
-            to_date = datetime.now().strftime("%Y-%m-%d")
-            from_date = (datetime.now()
-                         - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)
-                         ).strftime("%Y-%m-%d")
+            # No explicit range → default to the patient's CURRENT program cycle
+            # (active plan), or their most recent past cycle if none is active.
+            # Only if they have no dated plan at all do we fall back to the wide
+            # all-history window.
+            cycle = self._cycle_window(patient_id)
+            if cycle:
+                from_date, to_date = cycle
+            else:
+                to_date = datetime.now().strftime("%Y-%m-%d")
+                from_date = (datetime.now()
+                             - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)
+                             ).strftime("%Y-%m-%d")
 
         user_context = getattr(self, 'user_context', None)
         auth_token = (user_context.get('auth_token') or user_context.get('token')) if user_context else None

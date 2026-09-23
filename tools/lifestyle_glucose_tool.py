@@ -19,6 +19,7 @@ from typing import Optional, Any, List
 from langchain.tools import BaseTool
 
 from dal.database import DatabaseManager
+from dal.cycle_window import cycle_window
 from dal.postgres_db import resolve_range
 
 # Reuse the exact validated correlation + formatting from the single-factor tools.
@@ -144,6 +145,11 @@ class LifestyleGlucoseImpactTool(BaseTool):
                 return {"error": "Could not resolve that patient among your patients."}
 
             start, end, label = resolve_range(from_date, to_date, period)
+            if not start:                      # no dates given → use current cycle
+                cw = cycle_window(patient_id)
+                if cw:
+                    start, end = cw
+                    label = f"{start} to {end}"
             answer = _format_combined(display_name, requested, patient_id, start, end)
             answer += f"\n\n_Period analyzed: {label}._"
 

@@ -24,6 +24,7 @@ from sqlalchemy import text
 
 from dal.postgres_db import SessionLocalPG, resolve_range, date_where
 from dal.database import DatabaseManager
+from dal.cycle_window import cycle_window
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,11 @@ class MealGlucoseImpactTool(BaseTool):
                 return {"error": "Could not resolve that patient among your patients."}
 
             start, end, label = resolve_range(from_date, to_date, period)
+            if not start:                      # no dates given → use current cycle
+                cw = cycle_window(patient_id)
+                if cw:
+                    start, end = cw
+                    label = f"{start} to {end}"
             meals = _correlate(patient_id, start, end)
             answer = _format_meal_impact(display_name, meals)
             answer += f"\n\n_Period analyzed: {label}._"

@@ -26,6 +26,7 @@ from sqlalchemy import text
 from dal.postgres_db import SessionLocalPG, resolve_range, date_where
 from config import settings
 from dal.database import DatabaseManager
+from dal.cycle_window import cycle_window
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,11 @@ class SleepGlucoseImpactTool(BaseTool):
                 return {"error": "Could not resolve that patient among your patients."}
 
             start, end, label = resolve_range(from_date, to_date, period)
+            if not start:                      # no dates given → use current cycle
+                cw = cycle_window(patient_id)
+                if cw:
+                    start, end = cw
+                    label = f"{start} to {end}"
             nights, first, last = _nightly_sleep_glucose(patient_id, start, end)
             answer = _format_sleep_glucose(display_name, nights, first, last)
             answer += f"\n\n_Period analyzed: {label}._"

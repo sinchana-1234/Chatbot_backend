@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # it uses this window; an explicit period still overrides it.
     AGP_DEFAULT_WINDOW_DAYS: int = 14
 
+    # Glucose interpretation thresholds (mg/dL) for the patient-summary tool.
+    # Single source of truth — the tool reads these instead of hardcoding numbers.
+    GLUCOSE_LOW_MGDL: int = 70        # < this  → Low
+    GLUCOSE_ELEVATED_MGDL: int = 140  # > this  → slightly elevated (top of "normal")
+    GLUCOSE_HIGH_MGDL: int = 180      # > this  → High
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -14,6 +14,7 @@ from datetime import date, timedelta
 import httpx
 from langchain.tools import BaseTool
 from dal.postgres_db import resolve_range
+from dal.cycle_window import cycle_window
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -140,9 +141,13 @@ class AGPChartTool(BaseTool):
         if start:
             from_date, to_date = start, end
         else:
-            to_date = date.today().isoformat()
-            from_date = (date.today()
-                         - timedelta(days=settings.AGP_DEFAULT_WINDOW_DAYS)).isoformat()
+            cw = cycle_window(patient_id)
+            if cw:
+                from_date, to_date = cw
+            else:
+                to_date = date.today().isoformat()
+                from_date = (date.today()
+                             - timedelta(days=settings.AGP_DEFAULT_WINDOW_DAYS)).isoformat()
 
         token = user_context.get('token') if user_context else None
         if not token:

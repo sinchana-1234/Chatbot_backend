@@ -23,6 +23,31 @@ EHBA1C_TIR_API_URL = os.getenv(
 )
 
 
+def _cycle_window(patient_id: int):
+    """The patient's current program cycle as (from_date, to_date), 'YYYY-MM-DD'.
+    Active plan if any, else the most recent past plan. None if no dated plan."""
+    try:
+        from dal.database import DatabaseManager
+        with DatabaseManager() as dm:
+            plan = dm.get_current_active_plan(patient_id=patient_id)
+            if not (plan and plan.get("from_date")):
+                plans = dm.get_user_plans(patient_id=patient_id, active_only=False)
+                # Never fall back onto a not-yet-started (future) plan — keep only
+                # cycles that have already begun, newest first.
+                today = date.today().isoformat()
+                started = [p for p in plans if p.get("from_date") and p["from_date"][:10] <= today]
+                plan = started[0] if started else None
+            if not (plan and plan.get("from_date")):
+                return None
+            today = date.today().isoformat()
+            start = plan["from_date"][:10]
+            end = plan["to_date"][:10] if plan.get("to_date") else today
+            if end > today:
+                end = today
+            return start, end
+    except Exception:
+        return None
+
 class EHbA1cTIRTool(BaseTool):
     """Fetches a patient's eHbA1c/TIR trend data (first day vs last day,
     5-day periods, and device cycles), using the same live dashboard endpoint."""
@@ -114,9 +139,18 @@ class EHbA1cTIRTool(BaseTool):
         if range_requested:
             from_date, to_date = start, end
         else:
-            to_date = date.today().isoformat()
-            from_date = (date.today()
-                         - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)).isoformat()
+            # No explicit range → default to the patient's current program cycle
+            # (or most recent past cycle). Treat it as a requested range so the
+            # returned 5-day periods are filtered to the cycle, not all history.
+            cycle = _cycle_window(patient_id)
+            if cycle:
+                from_date, to_date = cycle
+                range_requested = True
+                period_label = f"{from_date} to {to_date}"
+            else:
+                to_date = date.today().isoformat()
+                from_date = (date.today()
+                             - timedelta(days=settings.TREND_ALL_HISTORY_LOOKBACK_DAYS)).isoformat()
 
         token = user_context.get('token') if user_context else None
         if not token:
@@ -165,11 +199,21 @@ class EHbA1cTIRTool(BaseTool):
             first_day = next((s for s in summary if s.get("dayType") == "DAY_1"), None)
             last_day = next((s for s in summary if s.get("dayType") == "LAST_DAY"), None)
             # summary's DAY_1 / LAST_DAY are whole-device-history endpoints. When a
-            # specific range was asked for, they are NOT this range's endpoints, so
-            # don't present them as such — the filtered periods carry the window.
+            # specific range (or the cycle default) is applied they are NOT this
+            # window's endpoints. Use the FILTERED periods' own first and last period
+            # as the comparison endpoints, so the reply compares WITHIN the window —
+            # rather than nulling them, which left the model to invent numbers from
+            # earlier in the chat (observed: a stale 62.2% TIR from a prior message).
             if range_requested:
-                first_day = None
-                last_day = None
+                if periods:
+                    _p0, _pN = periods[0], periods[-1]
+                    first_day = {"periodStart": _p0.get("periodStart"),
+                                 "tir": _p0.get("tir"), "ehba1c": _p0.get("ehba1c")}
+                    last_day = {"periodEnd": _pN.get("periodEnd"),
+                                "tir": _pN.get("tir"), "ehba1c": _pN.get("ehba1c")}
+                else:
+                    first_day = None
+                    last_day = None
 
             # If the user asked about a specific date, find the 5-day period
             # that contains it — this is the finest granularity the API offers
