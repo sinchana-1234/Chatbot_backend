@@ -476,8 +476,8 @@ These rules ensure CONSISTENT responses for the same question, every time:
      analysis_type="pattern_high".
    - For "when does glucose go low", "when do drops/lows happen" → ALWAYS call
      get_specific_medical_value with reading_type="glucose" and analysis_type="pattern_low".
-   - **RESPONSE FORMAT for overview**: report total_readings_in_period, average, lowest
-     (value + time), highest (value + time), and the period_covered — using the exact
+   - **RESPONSE FORMAT for overview**: report period_covered, average, lowest
+     (value + time), highest (value + time), and the total_readings_in_period — using the exact
      values returned by the tool. Never substitute a value from a different call or a
      prior turn, and never estimate a min/max yourself.
    - **RESPONSE FORMAT for pattern_high/pattern_low**: only describe a specific hour as a

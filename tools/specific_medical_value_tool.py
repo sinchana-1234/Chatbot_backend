@@ -44,7 +44,7 @@ def _pattern_h12(h):
     return f"{12 if h % 12 == 0 else h % 12} {'AM' if h < 12 else 'PM'}"
 
 def _pattern_hour_range(h):
-    return f"{_pattern_h12(h)}\u2013{_pattern_h12((h + 1) % 24)}"
+    return f"{_pattern_h12(h)}–{_pattern_h12((h + 1) % 24)}"
 
 def _pattern_join(items):
     items = list(dict.fromkeys(items))
@@ -89,7 +89,7 @@ def _format_pattern_prose(patient_name, reading_type, analysis_type, hourly_patt
             f"{_pattern_join(lead_bands)} hours.")
 
     bullets = [
-        f"* **{_pattern_hour_range(e['hour_of_day'])}** \u2014 {Adj} on {e['distinct_days']} days"
+        f"* **{_pattern_hour_range(e['hour_of_day'])}** — {Adj} on {e['distinct_days']} days"
         for e in top
     ]
 
@@ -444,21 +444,44 @@ class SpecificMedicalValueTool(BaseTool):
                         params,
                     ).fetchone()
 
-                    return json.dumps({
-                        "type": "overview",
-                        "reading_type": reading_type,
-                        "patient_id": patient_id,
-                        "total_readings_in_period": cnt,
-                        "average": round(float(agg_row[3]), 1) if agg_row[3] is not None else None,
-                        "lowest": {"value": float(min_reading[0]), "time": str(min_reading[1])},
-                        "highest": {"value": float(max_reading[0]), "time": str(max_reading[1])},
-                        "period_covered": {"from": str(agg_row[4]), "to": str(agg_row[5])},
-                        "note": (
-                            "This is a real aggregate computed over ALL matching readings "
-                            "in the period (no row limit) — count, average, lowest, and "
-                            "highest are all authoritative, not derived from a partial slice."
-                        )
-                    }, indent=2)
+                    # Format period dates
+                    period_from = str(agg_row[4])
+                    period_to = str(agg_row[5])
+
+                    # Reading type labels for display
+                    reading_labels = {
+                        "glucose": "glucose",
+                        "blood_pressure": "blood pressure",
+                        "heart_rate": "heart rate",
+                        "spo2": "SpO2",
+                        "stress": "stress",
+                        "hrv": "HRV",
+                    }
+
+                    reading_units = {
+                        "glucose": "mg/dL",
+                        "blood_pressure": "mmHg",
+                        "heart_rate": "bpm",
+                        "spo2": "%",
+                        "stress": "%",
+                        "hrv": "ms",
+                    }
+
+                    label = reading_labels.get(reading_type, reading_type.replace("_", " "))
+                    unit = reading_units.get(reading_type, "")
+
+                    # Format the prose response deterministically
+                    overview_prose = (
+                        f"* **Period Covered:** {period_from} to {period_to}\n"
+                        f"* **Average {label.title()}:** {round(float(agg_row[3]), 1) if agg_row[3] is not None else 'N/A'} {unit}\n"
+                        f"* **Lowest {label.title()}:** {float(min_reading[0])} {unit} (recorded on {min_reading[1]})\n"
+                        f"* **Highest {label.title()}:** {float(max_reading[0])} {unit} (recorded on {max_reading[1]})\n"
+                        f"* **Total Readings in Period:** {cnt}"
+                    )
+
+                    if user_context is not None:
+                        user_context['_last_overview_text'] = overview_prose
+                    return overview_prose
 
                 # -------------------------
                 # PATTERN_HIGH / PATTERN_LOW — hour-of-day bucketing across the
