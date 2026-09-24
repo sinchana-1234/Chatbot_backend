@@ -114,8 +114,6 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
     for b in buckets:
         n = "night" if b["days"] == 1 else "nights"
         lines.append(f"* {b['label']}: {b['days']} {n} \u2014 next-day glucose {b['avg_glucose']} mg/dL")
-        for day, hours, g in b["rows"]:
-            lines.append(f"    - {day}: {hours:.1f} h sleep \u2192 {round(g)} mg/dL next day")
     out = headline + "\n\n" + "\n".join(lines)
 
     if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:

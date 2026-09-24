@@ -245,8 +245,7 @@ class EHbA1cTIRTool(BaseTool):
             elif matched_period:
                 message = f"Data for the period covering {specific_date} is included below."
             else:
-                message = (f"eHbA1c/TIR trend for {scope} retrieved. "
-                           f"A trend chart has been attached separately for display.")
+                message = f"eHbA1c/TIR trend for {scope} retrieved."
 
             return json.dumps({
                 "patient_id": patient_id,

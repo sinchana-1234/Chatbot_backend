@@ -109,8 +109,6 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
     for b in buckets:
         d = "day" if b["days"] == 1 else "days"
         lines.append(f"* **{b['label']}:** {b['days']} {d} \u2014 average glucose {b['avg_glucose']} mg/dL")
-        for day, steps, g in b["rows"]:
-            lines.append(f"    - {day}: {int(steps):,} steps \u2192 {round(g)} mg/dL")
     out = headline + "\n\n" + "\n".join(lines)
 
     if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:

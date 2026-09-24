@@ -84,19 +84,11 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     else:
         headline = f"{name}'s glucose was lower on higher-stress days, {based_on}."
 
-    def _rows(group):
-        return "\n".join(
-            f"    - {d}: stress {round(s)} \u2192 {round(g)} mg/dL"
-            for d, s, g in sorted(group, key=lambda r: r[0])
-        )
-
     lines = [
         f"* Lower-stress days (stress at or below {round(med)}): {len(lower)} days "
         f"\u2014 average glucose {lower_g} mg/dL",
-        _rows(lower),
         f"* Higher-stress days (stress above {round(med)}): {len(higher)} days "
         f"\u2014 average glucose {higher_g} mg/dL",
-        _rows(higher),
     ]
     out = headline + "\n\n" + "\n".join(lines)
 
