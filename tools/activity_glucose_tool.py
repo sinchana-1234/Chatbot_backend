@@ -66,7 +66,7 @@ def _bucket(days: list) -> list:
 
 
 def _format_activity_glucose(name: Optional[str], days: list) -> str:
-    """days: list of (steps, avg_glucose) for days that have BOTH."""
+    """days: list of (date, steps, avg_glucose) for days that have BOTH."""
     name = name or "This patient"
     total = len(days)
 
@@ -80,7 +80,7 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
         d = "day" if total == 1 else "days"
         return (
             f"Only {total} {d} have both activity and glucose data for {name}, which is too "
-            f"little to tell how activity affects glucose. More  data is needed."
+            f"little to tell how activity affects glucose. More data is needed."
         )
 
     buckets = _bucket(days)
@@ -95,47 +95,58 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
         )
 
     low_b, high_b = buckets[0], buckets[-1]
-    delta = low_b["avg_glucose"] - high_b["avg_glucose"]  # +ve = higher activity, lower glucose
-    based_on = f"based on {total} days with both step and glucose data"
+    delta = low_b["avg_glucose"] - high_b["avg_glucose"]
 
+    # Get last 24 hours activity data
+    last_24h_activity = "N/A"
+    current_impact = "Unknown"
+    if days:
+        last_day = days[-1]
+        last_24h_activity = f"{int(last_day[1]):,} steps"
+        
+        # Determine which bucket the last day falls into
+        steps = last_day[1]
+        for b in buckets:
+            rows = b.get("rows", [])
+            if any(row[1] == steps for row in rows):
+                # Found the bucket
+                if delta > 0:  # Higher activity = lower glucose
+                    if b == low_b:
+                        current_impact = "Low activity is raising your glucose"
+                    elif b == high_b:
+                        current_impact = "High activity is lowering your glucose"
+                    else:
+                        current_impact = "Medium activity is keeping your glucose moderate"
+                elif delta < 0:  # Higher activity = higher glucose
+                    if b == low_b:
+                        current_impact = "Low activity is lowering your glucose"
+                    elif b == high_b:
+                        current_impact = "High activity is raising your glucose"
+                    else:
+                        current_impact = "Medium activity is keeping your glucose moderate"
+                else:  # No difference
+                    current_impact = "Activity shows minimal effect on your glucose"
+                break
+    
+    # Build user-friendly response
+    lines = [f"**Last 24 hours:** {last_24h_activity}"]
+    lines.append(f"**Current impact:** {current_impact}")
+    lines.append("")  # blank line
+    
     if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
-        headline = f"Activity didn't show a clear effect on {name}'s glucose, {based_on}."
+        summary = f"Activity showed minimal effect on glucose"
     elif delta > 0:
-        headline = f"{name}'s glucose levels were lower on days with higher activity, {based_on}."
+        summary = f"Higher activity → Lower glucose ({abs(delta)} mg/dL difference)"
     else:
-        headline = f"{name}'s glucose levels were higher on days with higher activity, {based_on}."
-
-    lines = []
+        summary = f"Higher activity → Higher glucose ({abs(delta)} mg/dL difference)"
+    
+    lines.append(f"**Summary:** {summary}")
+    lines.append("")  # blank line
+    
     for b in buckets:
-        d = "day" if b["days"] == 1 else "days"
-        lines.append(f"* **{b['label']}:** {b['days']} {d} \u2014 average glucose {b['avg_glucose']} mg/dL")
-    out = headline + "\n\n" + "\n".join(lines)
-
-    if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
-        direction = "lower" if delta > 0 else "higher"
-        overall = (
-            f"Overall pattern: Average glucose was {abs(delta)} mg/dL {direction} on "
-            f"{high_b['short']} days than on {low_b['short']} days."
-        )
-        thin = [b for b in (low_b, high_b) if b["days"] < settings.MIN_DAYS_FOR_FIRM_RESULT]
-        if thin:
-            if len(thin) == 1:
-                _d = "day" if thin[0]['days'] == 1 else "days"
-                overall += (
-                    f"\nThe {thin[0]['short']} group includes only {thin[0]['days']} {_d}, "
-                    f"so this pattern should be interpreted with caution."
-                )
-            else:
-                groups = " and ".join(
-                    f"{b['short']} ({b['days']} {'day' if b['days'] == 1 else 'days'})" for b in thin
-                )
-                overall += (
-                    f"\nThe {groups} groups are small, so this pattern should be "
-                    f"interpreted with caution."
-                )
-        out += "\n\n" + overall
-
-    return out
+        lines.append(f"• {b['label']}: {b['avg_glucose']} mg/dL")
+    
+    return "\n".join(lines)
 
 
 def _daily_activity_glucose(patient_id: int, start=None, end=None) -> list:

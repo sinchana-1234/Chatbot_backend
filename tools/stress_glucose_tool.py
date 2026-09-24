@@ -40,10 +40,9 @@ def _fmt_range(first, last) -> str:
 
 
 def _format_stress_glucose(name: Optional[str], days: list, first=None, last=None) -> str:
-    """days: list of (stress, avg_glucose) for days that have BOTH."""
+    """days: list of (date, stress, avg_glucose) for days that have BOTH."""
     name = name or "This patient"
     total = len(days)
-    rng = _fmt_range(first, last)
 
     if total == 0:
         return (
@@ -64,50 +63,57 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     lower = [(d, s, g) for d, s, g in days if s <= med]
     higher = [(d, s, g) for d, s, g in days if s > med]
 
-    # If the median sits on a spike of identical values, one side can be empty.
     if not lower or not higher:
         return (
             f"There isn't enough variation in stress to assess how it affects {name}'s glucose.\n\n"
-            f"Across {total} days, daily stress barely varies (around {round(med)} on a 0\u2013100 "
+            f"Across {total} days, daily stress barely varies (around {round(med)} on a 0–100 "
             f"scale), so there's no spread of stress levels to compare."
         )
 
     lower_g = round(sum(g for _, _, g in lower) / len(lower))
     higher_g = round(sum(g for _, _, g in higher) / len(higher))
-    delta = higher_g - lower_g          # +ve = higher stress, higher glucose
-    based_on = f"based on {total} days{rng} with both stress and glucose data"
+    delta = higher_g - lower_g
 
+    # Get last 24 hours stress data
+    last_24h_stress = "N/A"
+    current_impact = "Unknown"
+    if days:
+        last_day = days[-1]
+        last_24h_stress = f"{round(last_day[1])}/100"
+        
+        # Determine if last day is lower or higher stress
+        last_stress = last_day[1]
+        if delta > 0:  # Higher stress = higher glucose
+            if last_stress <= med:
+                current_impact = "Lower stress is lowering your glucose"
+            else:
+                current_impact = "Higher stress is raising your glucose"
+        elif delta < 0:  # Higher stress = lower glucose
+            if last_stress <= med:
+                current_impact = "Lower stress is raising your glucose"
+            else:
+                current_impact = "Higher stress is lowering your glucose"
+        else:  # No difference
+            current_impact = "Stress shows minimal effect on your glucose"
+    
+    # Build user-friendly response
+    lines = [f"**Last 24 hours:** {last_24h_stress}"]
+    lines.append(f"**Current impact:** {current_impact}")
+    lines.append("")  # blank line
+    
     if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
-        headline = f"Stress didn't show a clear effect on {name}'s glucose, {based_on}."
+        summary = f"Stress showed minimal effect on glucose"
     elif delta > 0:
-        headline = f"{name}'s glucose was higher on higher-stress days, {based_on}."
+        summary = f"Higher stress → Higher glucose ({abs(delta)} mg/dL difference)"
     else:
-        headline = f"{name}'s glucose was lower on higher-stress days, {based_on}."
-
-    lines = [
-        f"* Lower-stress days (stress at or below {round(med)}): {len(lower)} days "
-        f"\u2014 average glucose {lower_g} mg/dL",
-        f"* Higher-stress days (stress above {round(med)}): {len(higher)} days "
-        f"\u2014 average glucose {higher_g} mg/dL",
-    ]
-    out = headline + "\n\n" + "\n".join(lines)
-
-    if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
-        direction = "higher" if delta > 0 else "lower"
-        overall = (
-            f"Overall pattern: Average glucose was {abs(delta)} mg/dL {direction} on "
-            f"higher-stress days than on lower-stress days."
-        )
-        thin = min(len(lower), len(higher))
-        if thin < settings.STRESS_THIN_SIDE_DAYS:
-            side = "higher-stress" if len(higher) < len(lower) else "lower-stress"
-            overall += (
-                f"\n\nThe {side} group includes only {thin} days, so this pattern should be "
-                f"interpreted with caution."
-            )
-        out += "\n\n" + overall
-
-    return out
+        summary = f"Higher stress → Lower glucose ({abs(delta)} mg/dL difference)"
+    
+    lines.append(f"**Summary:** {summary}")
+    lines.append("")  # blank line
+    lines.append(f"• Lower stress (≤{round(med)}): {lower_g} mg/dL")
+    lines.append(f"• Higher stress (>{round(med)}): {higher_g} mg/dL")
+    
+    return "\n".join(lines)
 
 
 def _daily_stress_glucose(patient_id: int, start=None, end=None):

@@ -72,7 +72,6 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
     """nights: list of (sleep_hours, next_day_avg_glucose) for nights that have BOTH."""
     name = name or "This patient"
     total = len(nights)
-    rng = _fmt_range(first, last)
 
     if total == 0:
         return (
@@ -80,12 +79,12 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
             f"No nights have both sleep and next-day glucose readings, so the two can't be "
             f"compared. More sleep and CGM data from the same period is needed."
         )
-    if total <  settings.MIN_DAYS_TO_COMPARE:
+    if total < settings.MIN_DAYS_TO_COMPARE:
         n = "night" if total == 1 else "nights"
         return (
             f"There isn't enough matching data to reliably assess how sleep affects {name}'s glucose.\n\n"
             f"Only {total} {n} have both sleep and next-day glucose readings, which is too few "
-            f"to compare. More  data is needed."
+            f"to compare. More data is needed."
         )
 
     buckets = _bucket(nights)
@@ -99,45 +98,58 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
         )
 
     short_b, long_b = buckets[0], buckets[-1]
-    # +ve delta = longer sleep, lower next-day glucose
     delta = short_b["avg_glucose"] - long_b["avg_glucose"]
-    based_on = f"based on {total} nights{rng} with both sleep and next-day glucose data"
 
+    # Get last 24 hours sleep data
+    last_24h_sleep = "N/A"
+    current_impact = "Unknown"
+    if nights:
+        last_night = nights[-1]
+        last_24h_sleep = f"{round(last_night[1], 1)}h"
+        
+        # Determine which bucket the last night falls into
+        sleep_hours = last_night[1]
+        for b in buckets:
+            rows = b.get("rows", [])
+            if any(row[1] == sleep_hours for row in rows):
+                # Found the bucket
+                if delta > 0:  # Longer sleep = lower glucose
+                    if b == short_b:
+                        current_impact = "Short sleep is raising your glucose"
+                    elif b == long_b:
+                        current_impact = "Long sleep is lowering your glucose"
+                    else:
+                        current_impact = "Adequate sleep is keeping your glucose stable"
+                elif delta < 0:  # Longer sleep = higher glucose
+                    if b == short_b:
+                        current_impact = "Short sleep is lowering your glucose"
+                    elif b == long_b:
+                        current_impact = "Long sleep is raising your glucose"
+                    else:
+                        current_impact = "Adequate sleep is keeping your glucose stable"
+                else:  # No difference
+                    current_impact = "Sleep duration shows minimal effect on your glucose"
+                break
+    
+    # Build user-friendly response
+    lines = [f"**Last 24 hours:** {last_24h_sleep}"]
+    lines.append(f"**Current impact:** {current_impact}")
+    lines.append("")  # blank line
+    
     if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
-        headline = f"Sleep duration didn't show a clear effect on {name}'s glucose, {based_on}."
+        summary = f"Sleep duration showed minimal effect on glucose"
     elif delta > 0:
-        headline = f"{name}'s next-day glucose was lower after longer sleep, {based_on}."
+        summary = f"Longer sleep → Lower glucose ({abs(delta)} mg/dL difference)"
     else:
-        headline = f"{name}'s next-day glucose was higher after longer sleep, {based_on}."
-
-    lines = []
+        summary = f"Longer sleep → Higher glucose ({abs(delta)} mg/dL difference)"
+    
+    lines.append(f"**Summary:** {summary}")
+    lines.append("")  # blank line
+    
     for b in buckets:
-        n = "night" if b["days"] == 1 else "nights"
-        lines.append(f"* {b['label']}: {b['days']} {n} \u2014 next-day glucose {b['avg_glucose']} mg/dL")
-    out = headline + "\n\n" + "\n".join(lines)
-
-    if abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
-        direction = "lower" if delta > 0 else "higher"
-        overall = (
-            f"Overall pattern: Next-day glucose averaged {abs(delta)} mg/dL {direction} after "
-            f"{long_b['short'].replace('-', ' ')} nights than after {short_b['short'].replace('-', ' ')} nights."
-        )
-        thin = [b for b in (short_b, long_b) if b["days"] < settings.MIN_DAYS_FOR_FIRM_RESULT]
-        if thin:
-            if len(thin) == 1:
-                overall += (
-                    f"\n\nThe {thin[0]['short'].replace('-', ' ')} group includes only "
-                    f"{thin[0]['days']} nights, so this pattern should be interpreted with caution."
-                )
-            else:
-                groups = " and ".join(f"{b['short'].replace('-', ' ')} ({b['days']} nights)" for b in thin)
-                overall += (
-                    f"\n\nThe {groups} groups are small, so this pattern should be "
-                    f"interpreted with caution."
-                )
-        out += "\n\n" + overall
-
-    return out
+        lines.append(f"• {b['label']}: {b['avg_glucose']} mg/dL")
+    
+    return "\n".join(lines)
 
 
 def _nightly_sleep_glucose(patient_id: int, start=None, end=None):
