@@ -17,6 +17,7 @@ rather than inventing a ranking.
 
 import json
 import logging
+from collections import defaultdict
 from typing import Optional, Dict, Any
 
 from langchain.tools import BaseTool
@@ -48,12 +49,19 @@ def _norm_meal_type(mt: Optional[str]) -> str:
 
 def _carbs_from_analysis(analysis_data: Optional[str]) -> Optional[int]:
     """Pull carbohydrate grams out of the analysis_data JSON, if present.
-    Populated only for AI-analysed meals; image-only rows have 'null' or None."""
+    Real format nests it under macronutrients.carbohydrates.grams; 'null' or
+    image-only rows have no carbs."""
     if not analysis_data or str(analysis_data).strip().lower() in ("null", ""):
         return None
     try:
         d = json.loads(analysis_data)
-        c = d.get("carbohydrates")
+        carbs = (d.get("macronutrients") or {}).get("carbohydrates")
+        if isinstance(carbs, dict):          # real format: {"grams": 70, ...}
+            c = carbs.get("grams")
+        elif carbs is not None:              # flat number, if ever stored that way
+            c = carbs
+        else:                                # legacy top-level fallback
+            c = d.get("carbohydrates")
         return round(float(c)) if c is not None else None
     except (ValueError, TypeError, AttributeError):
         return None
@@ -79,40 +87,37 @@ def _format_meal_impact(patient_name: Optional[str], meals: list) -> str:
             f"More meal and CGM data from the same period is needed to identify meal-related glucose changes."
         )
 
-    measured.sort(key=lambda m: m["rise"], reverse=True)
-    excluded = len(meals) - len(measured)
-
-    k = len(measured)
-
-    if k < settings.MEAL_MIN_MEALS_FOR_RANKING:
-        meal_word = "meal has" if k == 1 else "meals have"
-        header = (
-            f"Only {k} {meal_word} matching glucose data, so there isn't enough data to "
-            f"reliably compare meal-related glucose changes."
-        )
-    else:
-        header = (
-            f"{name}'s meals ranked by their effect on glucose, from {k} logged "
-            f"meals with matching glucose data:"
-        )
-
-    lines = []
+    groups = defaultdict(list)
     for m in measured:
-        carb_clause = f"{m['carbs']} g carbs \u2192 " if m.get("carbs") is not None else ""
-        lines.append(
-            f"* **{m['meal_type']} \u2014 {m['date_str']}:** {carb_clause}glucose increased "
-            f"from {m['baseline']} to {m['peak']} mg/dL within {settings.MEAL_POSTMEAL_WINDOW_HOURS} hours."
-        )
+        groups[m["meal_type"]].append(m)
 
-    out = header + "\n\n" + "\n".join(lines)
+    stats = []
+    for mt, items in groups.items():
+        avg = round(sum(i["rise"] for i in items) / len(items))
+        top = max(items, key=lambda i: i["rise"])
+        stats.append({"type": mt, "n": len(items), "avg": avg, "top": top})
+    stats.sort(key=lambda s: s["avg"], reverse=True)
+
+    top = stats[0]
+    t = top["top"]
+    dish = (t.get("description") or "").strip() or top["type"].lower()
+    carbs = f" ({t['carbs']} g carbs)" if t.get("carbs") is not None else ""
+
+    summary = (
+        f"{name}'s glucose was affected most by {top['type'].lower()}, which raised it by an "
+        f"average of +{top['avg']} mg/dL across {top['n']} meals. The single biggest spike was "
+        f"after \u201c{dish}\u201d{carbs} on {t['date_str']}, rising from {t['baseline']} to "
+        f"{t['peak']} mg/dL."
+    )
+    if len(stats) > 1:
+        others = ", ".join(f"{s['type'].lower()} +{s['avg']} mg/dL" for s in stats[1:])
+        summary += f" By comparison: {others}."
+
+    excluded = len(meals) - len(measured)
     if excluded:
-        meal_word = "meal" if excluded == 1 else "meals"
-        verb = "was" if excluded == 1 else "were"
-        out += (
-            f"\n\n{excluded} other logged {meal_word} had no glucose readings within the "
-            f"{settings.MEAL_POSTMEAL_WINDOW_HOURS}-hour window and {verb} excluded."
-        )
-    return out
+        summary += f" ({excluded} meal{'s' if excluded != 1 else ''} had no glucose reading in the 2-hour window.)"
+
+    return summary
 
 
 def _correlate(patient_id: int, start=None, end=None) -> list:
@@ -158,6 +163,7 @@ def _correlate(patient_id: int, start=None, end=None) -> list:
         rise = round(peak - baseline) if (pts > 0 and baseline is not None and peak is not None) else None
         meals.append({
             "meal_type": _norm_meal_type(r["meal_type"]),
+            "description": r["description"],
             "date_str": (f"{r['actual_time'].strftime('%B')} {r['actual_time'].day}, {r['actual_time'].year}"
                          if r["actual_time"] else "unknown date"),
             "carbs": _carbs_from_analysis(r["analysis_data"]),
