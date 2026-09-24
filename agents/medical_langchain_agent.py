@@ -189,6 +189,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
    - Questions like "How is vikas patient's diabetes control?", "how is [patient]'s control", "diabetes management status", "glucose control assessment" are TREND questions
    - MUST call: get_ehba1c_tir_trend
    - MUST NOT call: get_agp_chart (even though AGP includes a snapshot)
+   - MUST NOT be triggered by "glucose trend" / "sugar trend". The word "trend" on
+     glucose/sugar → get_glucose_trend (rule 5d), EVEN when phrased "how is X's glucose
+     trend". This rule fires ONLY on "control" / "diabetes management" / "glucose control"
+     wording — not on the word "trend".
    - These questions ask for PROGRESS/TREND comparison (first day vs last day), not a single snapshot
    - The trend chart shows the patient's glucose CONTROL TRAJECTORY — not a point-in-time AGP profile
 
@@ -642,7 +646,10 @@ These rules ensure CONSISTENT responses for the same question, every time:
      DATE to DATE" question → use get_glucose_trend. The word "trend" applied to glucose or
      sugar means THIS tool, NOT get_ehba1c_tir_trend. Only use get_ehba1c_tir_trend when the
      user explicitly says eHbA1c / HbA1c / A1c, or asks to COMPARE progress between periods
-     or across device cycles (see 5b).
+     or across device cycles (see 5b),      "how is X's glucose trend?" / "how is the glucose trend" is ALSO get_glucose_trend —
+     the word "trend" wins over "how is X's..." (which alone is overview) and over
+     "diabetes control" (rule 1)..
+     
    - ALWAYS forward the user's stated period to get_glucose_trend: pass from_date/to_date
      (YYYY-MM-DD, or YYYY-MM / YYYY) for explicit dates, or period="<phrase>" for a relative
      phrase like "last 30 days" / "since June" / "this month". If the user names NO period,
@@ -672,10 +679,11 @@ These rules ensure CONSISTENT responses for the same question, every time:
        "what factors may be affecting this patient's glucose?", "what are the main concerns in
        this patient's data?" → get_lifestyle_glucose_impact (pass the factors named in the
        question; if none are named, pass all three: sleep, stress, activity).
-   - GLUCOSE PATTERNS / TRENDS (about glucose itself, not a lifestyle factor):
-     * "glucose trend(s)", "how has glucose changed over time", "show the trend" → get_glucose_trend
-     * "when does glucose go high?", "any low glucose episodes?", "when do spikes happen?"
-       → get_glucose_trend (it carries the actual daily readings and their dates)
+   - GLUCOSE TRENDS over time → get_glucose_trend:
+     * "glucose trend(s)", "how has glucose changed over time", "show the trend"
+   - GLUCOSE HIGH/LOW PATTERNS ("when does glucose go high/low", "when do spikes/drops happen")
+     → get_specific_medical_value with analysis_type pattern_high / pattern_low (see the rule
+     above). Do NOT route these to get_glucose_trend.
 
    - analyze_glucose_correlations is ONLY for a request that EXPLICITLY asks for a correlation
      or to "correlate" (e.g. "what's the correlation between activity and glucose?", "correlate

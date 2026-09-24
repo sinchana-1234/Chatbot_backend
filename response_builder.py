@@ -31,6 +31,15 @@ _AGP_CHART_KEY = "_last_agp_chart_data"
 _EHBA1C_CHART_KEY = "_last_ehba1c_tir_data"
 _SUGGESTIONS_KEY = "_last_suggestions"
 
+_CHART_KEYWORDS = ("graph", "chart", "plot", "visual", "visualize", "diagram")
+
+
+def _wants_chart(user_context: Optional[Dict[str, Any]]) -> bool:
+    """True only when the user explicitly asked for a visual (trend charts are opt-in)."""
+    q = ((user_context or {}).get("_current_query") or "").lower()
+    return any(kw in q for kw in _CHART_KEYWORDS)
+
+
 def _fallback_message(result: Any) -> str:
     """The LLM's own answer for this turn."""
     if isinstance(result, dict):
@@ -64,6 +73,21 @@ def resolve_agent_output(
         if value:
             verbatim.append(value)
 
-    response_text = verbatim[0] if len(verbatim) == 1 else fallback
+    if len(verbatim) == 1:
+        response_text = verbatim[0]
+    elif len(verbatim) >= 2:
+        # Multiple deterministic tools fired. Join their REAL outputs — do NOT
+        # hand them to the LLM to "merge", because that rewrite fabricated numbers.
+        # Concatenation preserves every tool's exact, correct answer.
+        response_text = "\n\n".join(verbatim)
+    else:
+        response_text = fallback
+
+    # Trend charts are opt-in — render only when the user asks for a graph.
+    # The AGP band + TIR pie (agp_chart_data) stay always-visual (true snapshots);
+    # the glucose trend line AND the eHbA1c/TIR trend are gated (both are trends over time).
+    if not _wants_chart(user_context):
+        chart_data = None
+        ehba1c_tir_data = None
 
     return response_text, chart_data, agp_chart_data, ehba1c_tir_data, suggestions

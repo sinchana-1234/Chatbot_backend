@@ -70,7 +70,7 @@ class AGPChartTool(BaseTool):
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
              from_date: Optional[str] = None, to_date: Optional[str] = None,
              include_tir: bool = False, include_agp: bool = True,
-             period: Optional[str] = None) -> str:
+             period: Optional[str] = None, **kwargs) -> str:
         user_context = getattr(self, 'user_context', None)
 
         # Decide AGP vs TIR from the ACTUAL words in the request, not from the
@@ -218,5 +218,5 @@ class AGPChartTool(BaseTool):
             return json.dumps({"error": f"Chart generation error: {str(e)}"})
 
     async def _arun(self, patient_id=None, patient_name=None, from_date=None, to_date=None,
-                    include_tir=False, include_agp=True, period=None):
+                    include_tir=False, include_agp=True, period=None, **kwargs):
         return self._run(patient_id, patient_name, from_date, to_date, include_tir, include_agp, period)

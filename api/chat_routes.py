@@ -429,7 +429,7 @@ async def handle_voice_query(
         result = await session_agent.chat(query_with_context)
 
         # Same single helper as /query -- identical response semantics, no drift.
-        response_text, chart_data, agp_chart_data, ehba1c_tir_data = resolve_agent_output(
+        response_text, chart_data, agp_chart_data, ehba1c_tir_data,  suggestions  = resolve_agent_output(
             getattr(session_agent, "user_context", None), result
         )
 
@@ -453,6 +453,7 @@ async def handle_voice_query(
             chart_data=chart_data,
             agpChartData=agp_chart_data,
             ehba1cTirData=ehba1c_tir_data,
+            suggestions=suggestions,
             user_context={
                 "user_id": current_user.user_id,
                 "role_name": current_user.role_name,
