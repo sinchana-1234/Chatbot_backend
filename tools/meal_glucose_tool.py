@@ -103,21 +103,22 @@ def _format_meal_impact(patient_name: Optional[str], meals: list) -> str:
     dish = (t.get("description") or "").strip() or top["type"].lower()
     carbs = f" ({t['carbs']} g carbs)" if t.get("carbs") is not None else ""
 
-    summary = (
-        f"{name}'s glucose was affected most by {top['type'].lower()}, which raised it by an "
-        f"average of +{top['avg']} mg/dL across {top['n']} meals. The single biggest spike was "
-        f"after \u201c{dish}\u201d{carbs} on {t['date_str']}, rising from {t['baseline']} to "
-        f"{t['peak']} mg/dL."
-    )
-    if len(stats) > 1:
-        others = ", ".join(f"{s['type'].lower()} +{s['avg']} mg/dL" for s in stats[1:])
-        summary += f" By comparison: {others}."
+    lines = [
+        f"**Meal Impact on Glucose \u2014 {name}**",
+        "",
+        f"{top['type']} had the biggest effect, raising glucose by an average of "
+        f"**+{top['avg']} mg/dL** across {top['n']} meals.",
+        "",
+        "**Biggest single spike:**",
+        f"{dish}{carbs} \u2014 {t['date_str']}, glucose rose "
+        f"**{t['baseline']} \u2192 {t['peak']} mg/dL**.",
+        "",
+        "**Average rise by meal type:**",
+    ]
+    for s in stats:
+        lines.append(f"- **{s['type']}** \u2014 +{s['avg']} mg/dL")
 
-    excluded = len(meals) - len(measured)
-    if excluded:
-        summary += f" ({excluded} meal{'s' if excluded != 1 else ''} had no glucose reading in the 2-hour window.)"
-
-    return summary
+    return "\n".join(lines)
 
 
 def _correlate(patient_id: int, start=None, end=None) -> list:

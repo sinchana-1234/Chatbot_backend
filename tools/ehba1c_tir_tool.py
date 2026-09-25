@@ -48,6 +48,57 @@ def _cycle_window(patient_id: int):
     except Exception:
         return None
 
+def _fmt_pct(v, decimals=None):
+    if v is None:
+        return None
+    return f"{float(v):.{decimals}f}" if decimals is not None else f"{float(v):g}"
+
+
+def _fmt_period_range(start_iso, end_iso, fallback):
+    """Format the actual data-covered period, e.g. 'September 9 – 24, 2026'."""
+    from datetime import datetime as _dt
+    try:
+        d1 = _dt.fromisoformat(str(start_iso)[:19])
+        d2 = _dt.fromisoformat(str(end_iso)[:19])
+        if d1.year == d2.year and d1.month == d2.month:
+            return f"{d1.strftime('%B')} {d1.day} \u2013 {d2.day}, {d2.year}"
+        if d1.year == d2.year:
+            return f"{d1.strftime('%B')} {d1.day} \u2013 {d2.strftime('%B')} {d2.day}, {d2.year}"
+        return f"{d1.strftime('%B')} {d1.day}, {d1.year} \u2013 {d2.strftime('%B')} {d2.day}, {d2.year}"
+    except Exception:
+        return fallback
+
+
+def _format_ehba1c_tir_prose(name, first_day, last_day, scope):
+    """Deterministic first->last prose, delivered verbatim. States each metric's own
+    direction factually — no global 'positive'/'improvement' verdict."""
+    if not first_day or not last_day:
+        return None
+    name = name or "This patient"
+    ft, lt = first_day.get("tir"), last_day.get("tir")
+    fe, le = first_day.get("ehba1c"), last_day.get("ehba1c")
+
+    clauses = []
+    if ft is not None and lt is not None:
+        if lt > ft:
+            clauses.append(f"time in range improved from {_fmt_pct(ft)}% to {_fmt_pct(lt)}%")
+        elif lt < ft:
+            clauses.append(f"time in range dropped from {_fmt_pct(ft)}% to {_fmt_pct(lt)}%")
+        else:
+            clauses.append(f"time in range held at {_fmt_pct(ft)}%")
+    if fe is not None and le is not None:
+        if le > fe:
+            clauses.append(f"estimated eHbA1c edged up from {_fmt_pct(fe, 2)}% to {_fmt_pct(le, 2)}%")
+        elif le < fe:
+            clauses.append(f"estimated eHbA1c eased down from {_fmt_pct(fe, 2)}% to {_fmt_pct(le, 2)}%")
+        else:
+            clauses.append(f"estimated eHbA1c held at {_fmt_pct(fe, 2)}%")
+
+    if not clauses:
+        return None
+    period_str = _fmt_period_range(first_day.get("periodStart"), last_day.get("periodEnd"), scope)
+    return f"{name}'s " + ", while ".join(clauses) + f".\n\n_Analyzed period: {period_str}_"
+
 class EHbA1cTIRTool(BaseTool):
     """Fetches a patient's eHbA1c/TIR trend data (first day vs last day,
     5-day periods, and device cycles), using the same live dashboard endpoint."""
@@ -84,6 +135,7 @@ class EHbA1cTIRTool(BaseTool):
              from_date: Optional[str] = None, to_date: Optional[str] = None,
              specific_date: Optional[str] = None, period: Optional[str] = None) -> str:
         user_context = getattr(self, 'user_context', None)
+        display_name = None
 
         if user_context and user_context.get('role_id') == 1:
             patient_id = user_context.get('user_id')
@@ -107,6 +159,8 @@ class EHbA1cTIRTool(BaseTool):
                             "suggestion": "Please specify which patient exactly."
                         })
                     patient_id = own_matching[0]["patient_id"]
+                    display_name = (f"{own_matching[0].get('patient_first_name') or ''} "
+                                    f"{own_matching[0].get('patient_last_name') or ''}".strip().title()) or None
                 else:
                     users = db_manager.get_users()
                     matching = [
@@ -126,6 +180,8 @@ class EHbA1cTIRTool(BaseTool):
                             "suggestion": "Please specify which patient exactly."
                         })
                     patient_id = matching[0].id
+                    display_name = (f"{matching[0].first_name or ''} "
+                                    f"{matching[0].last_name or ''}".strip().title()) or None
         elif not patient_id:
             return json.dumps({"error": "patient_id or patient_name is required for staff queries"})
 
@@ -246,6 +302,13 @@ class EHbA1cTIRTool(BaseTool):
                 message = f"Data for the period covering {specific_date} is included below."
             else:
                 message = f"eHbA1c/TIR trend for {scope} retrieved."
+
+            # Deliver the trend as finished verbatim prose (same bypass as glucose/meals)
+            # so the wording is deterministic and never overstated.
+            if user_context is not None and not specific_date:
+                prose = _format_ehba1c_tir_prose(display_name, first_day, last_day, scope)
+                if prose:
+                    user_context['_last_ehba1c_tir_text'] = prose
 
             return json.dumps({
                 "patient_id": patient_id,

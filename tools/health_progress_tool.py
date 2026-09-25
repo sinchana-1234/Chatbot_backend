@@ -82,7 +82,26 @@ def _thin_axis_labels(dates: list) -> list:
         out.append(dates[i] if show else "")
     return out
 
+def _glucose_direction_phrase(glucose_daily: list) -> str:
+    """A short phrase for the prose lead: 'roughly stable' / 'trending upward (…)' /
+    'trending downward (…)'. 'fairly steady' when there are too few days to judge."""
+    rows = sorted((d for d in glucose_daily if d.get("meanGlucose") is not None),
+                  key=lambda d: d.get("glucoseDate") or "")
+    vals = [d["meanGlucose"] for d in rows]
+    if len(vals) < 4:
+        return "fairly steady"
+    mid = len(vals) // 2
+    first = round(sum(vals[:mid]) / mid)
+    last = round(sum(vals[mid:]) / (len(vals) - mid))
+    delta = last - first
+    if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
+        return "roughly stable"
+    arrow = "upward" if delta > 0 else "downward"
+    return f"trending {arrow} (about {first} \u2192 {last} mg/dL)"
+
+
 def _format_glucose_trend_prose(summary: dict, from_date: str, to_date: str,
+                                glucose_daily: Optional[list] = None,
                                 is_fallback: bool = False) -> str:
     """Build the glucose-trend answer as a finished bulleted summary, delivered to
     the user verbatim (chat_routes returns it directly, bypassing the LLM's
@@ -109,26 +128,32 @@ def _format_glucose_trend_prose(summary: dict, from_date: str, to_date: str,
     tbr = summary.get("avg_tbr_pct")
     cv  = summary.get("avg_cv_pct")
 
+    direction = _glucose_direction_phrase(glucose_daily or [])
+
     if is_fallback:
-        header = ("No recent glucose data is available. Here are the most recent "
-                  f"available glucose trends from {date_range}:")
+        s1 = (f"No recent glucose data is available; over the most recent period "
+              f"({date_range}), glucose was {direction}, averaging {avg} mg/dL")
     else:
-        header = f"Here are the glucose trends from {date_range}:"
-
-    lines = [f"* **Average glucose:** {avg} mg/dL"]
-    if lo is not None and hi is not None:
-        # \u2013 is an en dash (kept as an escape so the source stays ASCII).
-        lines.append(f"* **Glucose range:** {lo}\u2013{hi} mg/dL")
-    if tir is not None:
-        lines.append(f"* **Time in Range (TIR):** {tir}%")
-    if tbr is not None:
-        lines.append(f"* **Below range:** {tbr}%")
-    if tar is not None:
-        lines.append(f"* **Above range:** {tar}%")
+        s1 = f"Over {date_range}, glucose was {direction}, averaging {avg} mg/dL"
     if cv is not None:
-        lines.append(f"* **Glucose variability (CV):** {cv}%")
+        s1 += f" with {cv}% variability (CV)"
+    s1 += "."
 
-    return header + "\n\n" + "\n".join(lines)
+    s2 = ""
+    if tir is not None:
+        s2 = f" Time in range was {tir}%"
+        extras = []
+        if tbr is not None:
+            extras.append(f"{tbr}% below")
+        if tar is not None:
+            extras.append(f"{tar}% above")
+        if extras:
+            s2 += f" ({', '.join(extras)} target)"
+        if lo is not None and hi is not None:
+            s2 += f", and readings ranged {lo}\u2013{hi} mg/dL"
+        s2 += "."
+
+    return s1 + s2
 
 
 class HealthProgressBase(BaseTool):
@@ -742,6 +767,7 @@ class HealthProgressBase(BaseTool):
             label_to = _dates[-1] if _dates else to_date
             glucose_prose = _format_glucose_trend_prose(
                 summary, label_from, label_to,
+                glucose_daily=glucose_daily,
                 is_fallback=(status != "ok"),
             )
             # Deliver verbatim, bypassing the LLM's formatting entirely (same
