@@ -3,6 +3,7 @@
 Food log service for handling food log and nutrition data
 """
 
+import json
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -11,6 +12,24 @@ from sqlalchemy.orm import Session
 from .base_service import BaseService
 
 logger = logging.getLogger(__name__)
+
+
+def _foodlog_nutrition(analysis_data):
+    """Parse calories + macro grams from analysis_data JSON. Real format nests
+    macros under macronutrients.<macro>.grams. None for anything not present."""
+    out = {"calories": None, "carbs_g": None, "protein_g": None, "fat_g": None}
+    if not analysis_data or str(analysis_data).strip().lower() in ("null", ""):
+        return out
+    try:
+        d = json.loads(analysis_data)
+        out["calories"] = (d.get("total_calories") or {}).get("best_estimate")
+        macros = d.get("macronutrients") or {}
+        for key, field in (("carbohydrates", "carbs_g"), ("protein", "protein_g"), ("fats", "fat_g")):
+            m = macros.get(key)
+            out[field] = m.get("grams") if isinstance(m, dict) else m
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return out
 
 class FoodlogService(BaseService):
     """Service for handling food log operations"""
@@ -57,6 +76,7 @@ class FoodlogService(BaseService):
 
             foodlog_list = []
             for r in rows:
+                nut = _foodlog_nutrition(r["analysis_data"])
                 foodlog_list.append({
                     "id": r["id"],
                     "type": r["type"],
@@ -71,6 +91,10 @@ class FoodlogService(BaseService):
                     "latitude": r["latitude"],
                     "longitude": r["longitude"],
                     "analysis_data": r["analysis_data"],
+                    "calories": nut["calories"],
+                    "carbs_g": nut["carbs_g"],
+                    "protein_g": nut["protein_g"],
+                    "fat_g": nut["fat_g"],
                     "meal_type": r["meal_type"],
                 })
 
@@ -125,7 +149,7 @@ class FoodlogService(BaseService):
                     items_by_pid = {}
                 else:
                     rows = pg.execute(text(
-                        f"SELECT patient_id, description, url, type, meal_type, actual_time "
+                        f"SELECT patient_id, description, url, type, meal_type, actual_time ,  analysis_data "
                         f"FROM foodlog WHERE {where_sql} ORDER BY patient_id, actual_time ASC"
                     ), params).mappings().all()
                     items_by_pid, pid_order = {}, []
@@ -134,10 +158,13 @@ class FoodlogService(BaseService):
                         if pid not in items_by_pid:
                             items_by_pid[pid] = []
                             pid_order.append(pid)
+                        nut = _foodlog_nutrition(r["analysis_data"])
                         items_by_pid[pid].append({
                             "time": r["actual_time"].strftime("%I:%M %p") if r["actual_time"] else None,
                             "description": r["description"], "url": r["url"],
                             "type": r["type"], "meal_type": r["meal_type"],
+                            "calories": nut["calories"], "carbs_g": nut["carbs_g"],
+                            "protein_g": nut["protein_g"], "fat_g": nut["fat_g"],
                         })
             finally:
                 pg.close()

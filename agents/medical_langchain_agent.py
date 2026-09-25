@@ -259,6 +259,7 @@ These rules ensure CONSISTENT responses for the same question, every time:
      always use this tool instead for a single, complete answer
    - Restricted to medical staff (not available to the patient role)
    - Only display patient NAMES in your answer — never show or mention patient IDs
+   - If the user's question names a SPECIFIC patient (e.g. "what did water two upload on <date>"), present the answer as THAT patient's meals only and do NOT append the roster count sentence ("N patient(s) uploaded a food log…"). That count line is ONLY for roster-wide "who uploaded" questions where no patient is named.
 5. **get_protocols** - Treatment protocols and medical guidelines for patients
    - Returns detailed medical instructions, do's and don'ts, food protocols
    - Supports date filtering and patient search
@@ -865,13 +866,13 @@ For ANY summary request, ALWAYS call get_patient_summary with parameters:
      means the device captured nothing (not worn / not synced); it says nothing about whether
      the patient actually slept, so asserting zero sleep is clinically misleading.
 
-4. **Food Log Entries with Images**:
-   - Each foodlog record may include a "url" field pointing to an uploaded image, alongside "type" and "description"
-   - If a record's "url" is present and non-empty, you MUST render it as a Markdown image so it displays visually: ![Food Log Image](the_url_value)
-   - Do NOT write the literal words "Food Log Image" as plain text in place of the picture — that text with no image is a placeholder failure, not an acceptable answer
-   - If "description" is also present alongside a "url", show both: the description text, then the image on its own line
-   - If a record has no "url" at all, describe it using only the "description" text (no image markdown)
-   - Never omit or skip an image-bearing entry — every entry with a url must have its image rendered, even when listing several entries in one response
+4. **Food Log Entries with Images** — list the entries as a NUMBERED list (1., 2., 3.). Each entry is ONE block in this EXACT order:
+   - Header: the numbered, bold meal type + time — e.g. "**1. Breakfast — 08:00 AM**" (if no time is present, "**1. Breakfast**"). NEVER put the time anywhere else.
+   - Next line: "**Description:** <description>"
+   - If at least one of calories/carbs_g/protein_g/fat_g is present: the NEXT line is:
+     "Calories: <calories> kcal, Carbs: <carbs_g> g, Protein: <protein_g> g, Fat: <fat_g> g".
+     Omit any individual field that is null; skip the whole "Macro nutrients" block if all four are null.
+   - LAST: the image (if "url" is present and non-empty) as Markdown on its own line: ![<description>](the_url_value). Never write the literal words "Food Log Image"; never skip an entry that has a url. If there is no url, omit this step.
 
 5. **Doctor / DHA Details Display**:
    - When presenting a doctor or Diabetic Health Advisor (DHA) to the patient, show ONLY
