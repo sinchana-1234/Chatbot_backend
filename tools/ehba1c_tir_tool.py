@@ -61,10 +61,10 @@ def _fmt_period_range(start_iso, end_iso, fallback):
         d1 = _dt.fromisoformat(str(start_iso)[:19])
         d2 = _dt.fromisoformat(str(end_iso)[:19])
         if d1.year == d2.year and d1.month == d2.month:
-            return f"{d1.strftime('%B')} {d1.day} \u2013 {d2.day}, {d2.year}"
+            return f"{d1.strftime('%d-%m-%Y')} – {d2.strftime('%d-%m-%Y')}"
         if d1.year == d2.year:
-            return f"{d1.strftime('%B')} {d1.day} \u2013 {d2.strftime('%B')} {d2.day}, {d2.year}"
-        return f"{d1.strftime('%B')} {d1.day}, {d1.year} \u2013 {d2.strftime('%B')} {d2.day}, {d2.year}"
+            return f"{d1.strftime('%d-%m-%Y')} – {d2.strftime('%d-%m-%Y')}"
+        return f"{d1.strftime('%d-%m-%Y')} – {d2.strftime('%d-%m-%Y')}"
     except Exception:
         return fallback
 

@@ -165,7 +165,7 @@ def _correlate(patient_id: int, start=None, end=None) -> list:
         meals.append({
             "meal_type": _norm_meal_type(r["meal_type"]),
             "description": r["description"],
-            "date_str": (f"{r['actual_time'].strftime('%B')} {r['actual_time'].day}, {r['actual_time'].year}"
+            "date_str": (f"{r['actual_time'].strftime('%d-%m-%Y')}"
                          if r["actual_time"] else "unknown date"),
             "carbs": _carbs_from_analysis(r["analysis_data"]),
             "baseline": round(baseline) if baseline is not None else None,

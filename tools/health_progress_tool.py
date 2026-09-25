@@ -114,7 +114,7 @@ def _format_glucose_trend_prose(summary: dict, from_date: str, to_date: str,
         d1 = datetime.strptime(from_date, "%Y-%m-%d")
         d2 = datetime.strptime(to_date, "%Y-%m-%d")
         if d1.year == d2.year:
-            date_range = f"{d1.strftime('%B')} {d1.day} to {d2.strftime('%B')} {d2.day}, {d2.year}"
+            date_range = f"{d1.strftime('%d-%m-%Y')} to {d2.strftime('%d-%m-%Y')}"
         else:
             date_range = f"{d1.strftime('%B')} {d1.day}, {d1.year} to {d2.strftime('%B')} {d2.day}, {d2.year}"
     except (ValueError, TypeError):

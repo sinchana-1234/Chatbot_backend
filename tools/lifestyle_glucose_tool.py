@@ -27,6 +27,16 @@ from tools.sleep_glucose_tool import _nightly_sleep_glucose, _format_sleep_gluco
 from tools.stress_glucose_tool import _daily_stress_glucose, _format_stress_glucose
 from tools.activity_glucose_tool import _daily_activity_glucose, _format_activity_glucose
 
+from datetime import datetime
+
+def _format_iso_date(date_str):
+    """Convert YYYY-MM-DD to DD-MM-YYYY"""
+    try:
+        date_obj = datetime.strptime(str(date_str), "%Y-%m-%d")
+        return date_obj.strftime("%d-%m-%Y")
+    except Exception:
+        return str(date_str)
+
 logger = logging.getLogger(__name__)
 
 # canonical factor name -> (section heading, "not available" label)
@@ -149,7 +159,7 @@ class LifestyleGlucoseImpactTool(BaseTool):
                 cw = cycle_window(patient_id)
                 if cw:
                     start, end = cw
-                    label = f"{start} to {end}"
+                    label = f"{_format_iso_date(start)} to {_format_iso_date(end)}"  # Returns: "11-09-2026 to 25-09-2026"
             answer = _format_combined(display_name, requested, patient_id, start, end)
             answer += f"\n\n_Period analyzed: {label}._"
 

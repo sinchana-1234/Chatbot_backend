@@ -13,6 +13,14 @@ from sqlalchemy import text
 from dal.postgres_db import SessionLocalPG
 from dal.cycle_window import cycle_window
 
+def _format_date(date_str):
+    """Convert date from yyyy-mm-dd to dd-mm-yyyy format"""
+    try:
+        date_obj = datetime.strptime(str(date_str), "%Y-%m-%d")
+        return date_obj.strftime("%d-%m-%Y")
+    except Exception:
+        return str(date_str)
+
 logger = logging.getLogger(__name__)
 
 # --- Deterministic formatter for pattern_high / pattern_low answers ------------
@@ -89,7 +97,9 @@ def _format_pattern_prose(patient_name, reading_type, analysis_type, hourly_patt
             f"{_pattern_join(lead_bands)} hours.")
 
     bullets = [
-        f"* **{_pattern_hour_range(e['hour_of_day'])}** — {Adj} on {e['distinct_days']} days"
+        f"* **{_pattern_hour_range(e['hour_of_day'])}** — {Adj} on {e['distinct_days']} days " +
+        (f"({', '.join(e.get('day_list', [])[:3])}" + (f", +{len(e.get('day_list', [])) - 3} more)" if len(e.get('day_list', [])) > 3 else ")")
+        if e.get('day_list') else "")
         for e in top
     ]
 
@@ -445,8 +455,8 @@ class SpecificMedicalValueTool(BaseTool):
                     ).fetchone()
 
                     # Format period dates
-                    period_from = str(agg_row[4])
-                    period_to = str(agg_row[5])
+                    period_from = _format_date(str(agg_row[4]))
+                    period_to = _format_date(str(agg_row[5]))
 
                     # Reading type labels for display
                     reading_labels = {
@@ -474,9 +484,8 @@ class SpecificMedicalValueTool(BaseTool):
                     overview_prose = (
                         f"* **Period Covered:** {period_from} to {period_to}\n"
                         f"* **Average {label.title()}:** {round(float(agg_row[3]), 1) if agg_row[3] is not None else 'N/A'} {unit}\n"
-                        f"* **Lowest {label.title()}:** {float(min_reading[0])} {unit} (recorded on {min_reading[1]})\n"
-                        f"* **Highest {label.title()}:** {float(max_reading[0])} {unit} (recorded on {max_reading[1]})\n"
-                        f"* **Total Readings in Period:** {cnt}"
+                        f"* **Lowest {label.title()}:** {float(min_reading[0])} {unit} (recorded on {_format_date(str(min_reading[1]))})\n"
+                        f"* **Highest {label.title()}:** {float(max_reading[0])} {unit} (recorded on {_format_date(str(max_reading[1]))})\n"                        f"* **Total Readings in Period:** {cnt}"
                     )
 
                     if user_context is not None:
@@ -537,10 +546,14 @@ class SpecificMedicalValueTool(BaseTool):
                     all_days = set()
                     for val, ts, hr, day in rows:
                         hr = int(hr)
-                        all_days.add(day)
-                        b = buckets.setdefault(hr, {"count": 0, "days": set(), "examples": []})
+                        day_str = str(day)  # Normalize to string ONCE
+                        all_days.add(day_str)
+                        b = buckets.setdefault(hr, {"count": 0, "days": set(), "day_list": [], "examples": []})
                         b["count"] += 1
-                        b["days"].add(day)
+                        if day_str not in b["days"]:  # Only add date once per day
+                            formatted_date = _format_date(day_str)
+                            b["day_list"].append(formatted_date)
+                        b["days"].add(day_str)
                         if len(b["examples"]) < 3:
                             b["examples"].append({"value": float(val), "time": str(ts)})
 
@@ -549,6 +562,7 @@ class SpecificMedicalValueTool(BaseTool):
                             "hour_of_day": hr,
                             "count": b["count"],
                             "distinct_days": len(b["days"]),
+                            "day_list": sorted(b["day_list"]),
                             "example_readings": b["examples"],
                         }
                         for hr, b in sorted(buckets.items(), key=lambda kv: -kv[1]["count"])

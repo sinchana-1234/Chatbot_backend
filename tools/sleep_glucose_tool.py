@@ -49,8 +49,8 @@ def _fmt_range(first, last) -> str:
     if not first or not last:
         return ""
     if first == last:
-        return f" ({first:%d %b %Y})"
-    return f" (between {first:%d %b %Y} and {last:%d %b %Y})"
+        return f" ({first:%d-%m-%Y})"
+    return f" (between {first:%d-%m-%Y} and {last:%d-%m-%Y})"
 
 
 def _bucket(nights: list) -> list:

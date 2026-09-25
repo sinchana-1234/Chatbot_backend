@@ -198,11 +198,11 @@ class DeviceTool(BaseTool):
                     # Add friendly message
                     if is_expired:
                         if expiry_date:
-                            result["message"] = f"{patient_name}'s most recent {device.name} expired on {expiry_date.strftime('%Y-%m-%d')}."
+                            result["message"] = f"{patient_name}'s most recent {device.name} expired on {expiry_date.strftime('%d-%m-%Y')}."
                         else:
                             result["message"] = f"{patient_name}'s most recent {device.name} has expired."
                     elif days_until_expiry is not None:
-                        result["message"] = f"{patient_name}'s {device.name} is active and expires in {days_until_expiry} days ({expiry_date.strftime('%Y-%m-%d')})."
+                        result["message"] = f"{patient_name}'s {device.name} is active and expires in {days_until_expiry} days ({expiry_date.strftime('%d-%m-%Y')})."
                     else:
                         result["message"] = f"{patient_name}'s {device.name} is active but no expiry date is available."
                     
