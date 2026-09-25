@@ -73,42 +73,44 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     lower_g = round(sum(g for _, _, g in lower) / len(lower))
     higher_g = round(sum(g for _, _, g in higher) / len(higher))
     delta = higher_g - lower_g
+    significant = abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL
 
-    # Get last 24 hours stress data
-    last_24h_stress = "N/A"
+    # Most recent day that actually has both readings. `days` is not date-sorted,
+    # so take the max date — this is the latest day WITH data, NOT "the last 24 hours".
+    latest_label = "N/A"
     current_impact = "Unknown"
     if days:
-        last_day = days[-1]
-        last_24h_stress = f"{round(last_day[1])}/100"
-        
-        # Determine if last day is lower or higher stress
-        last_stress = last_day[1]
-        if delta > 0:  # Higher stress = higher glucose
-            if last_stress <= med:
-                current_impact = "Lower stress is lowering your glucose"
-            else:
-                current_impact = "Higher stress is raising your glucose"
-        elif delta < 0:  # Higher stress = lower glucose
-            if last_stress <= med:
-                current_impact = "Lower stress is raising your glucose"
-            else:
-                current_impact = "Higher stress is lowering your glucose"
-        else:  # No difference
+        last_day = max(days, key=lambda r: r[0])
+        latest_label = f"{last_day[0]:%d %b %Y} — {round(last_day[1])}/100"
+
+        if not significant:
             current_impact = "Stress shows minimal effect on your glucose"
-    
+        else:
+            last_stress = last_day[1]
+            if delta > 0:  # Higher stress = higher glucose
+                if last_stress <= med:
+                    current_impact = "Lower stress is lowering your glucose"
+                else:
+                    current_impact = "Higher stress is raising your glucose"
+            else:          # Higher stress = lower glucose
+                if last_stress <= med:
+                    current_impact = "Lower stress is raising your glucose"
+                else:
+                    current_impact = "Higher stress is lowering your glucose"
+
     # Build user-friendly response
-    lines = [f"**Last 24 hours:** {last_24h_stress}"]
+    lines = [f"**Most recent day with data:** {latest_label}"]
     lines.append("")
     lines.append(f"**Current impact:** {current_impact}")
     lines.append("")  # blank line
-    
-    if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
+
+    if not significant:
         summary = f"Stress showed minimal effect on glucose"
     elif delta > 0:
         summary = f"Higher stress → Higher glucose ({abs(delta)} mg/dL difference)"
     else:
         summary = f"Higher stress → Lower glucose ({abs(delta)} mg/dL difference)"
-    
+
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
     lines.append(f"- Lower stress (≤{round(med)}): {lower_g} mg/dL")

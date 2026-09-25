@@ -99,51 +99,51 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
 
     short_b, long_b = buckets[0], buckets[-1]
     delta = short_b["avg_glucose"] - long_b["avg_glucose"]
+    significant = abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL
 
-    # Get last 24 hours sleep data
-    last_24h_sleep = "N/A"
+    # Most recent night that actually has both readings. `nights` is not date-sorted,
+    # so take the max date — this is the latest night WITH data, NOT "the last 24 hours".
+    latest_label = "N/A"
     current_impact = "Unknown"
     if nights:
-        last_night = nights[-1]
-        last_24h_sleep = f"{round(last_night[1], 1)}h"
-        
-        # Determine which bucket the last night falls into
-        sleep_hours = last_night[1]
-        for b in buckets:
-            rows = b.get("rows", [])
-            if any(row[1] == sleep_hours for row in rows):
-                # Found the bucket
-                if delta > 0:  # Longer sleep = lower glucose
-                    if b == short_b:
-                        current_impact = "Short sleep is raising your glucose"
-                    elif b == long_b:
-                        current_impact = "Long sleep is lowering your glucose"
-                    else:
-                        current_impact = "Adequate sleep is keeping your glucose stable"
-                elif delta < 0:  # Longer sleep = higher glucose
-                    if b == short_b:
-                        current_impact = "Short sleep is lowering your glucose"
-                    elif b == long_b:
-                        current_impact = "Long sleep is raising your glucose"
-                    else:
-                        current_impact = "Adequate sleep is keeping your glucose stable"
-                else:  # No difference
-                    current_impact = "Sleep duration shows minimal effect on your glucose"
-                break
-    
+        last_night = max(nights, key=lambda r: r[0])
+        latest_label = f"{last_night[0]:%d %b %Y} — {round(last_night[1], 1)}h"
+
+        if not significant:
+            current_impact = "Sleep duration shows minimal effect on your glucose"
+        else:
+            sleep_hours = last_night[1]
+            for b in buckets:
+                if any(row[1] == sleep_hours for row in b.get("rows", [])):
+                    if delta > 0:  # Longer sleep = lower glucose
+                        if b == short_b:
+                            current_impact = "Short sleep is raising your glucose"
+                        elif b == long_b:
+                            current_impact = "Long sleep is lowering your glucose"
+                        else:
+                            current_impact = "Adequate sleep is keeping your glucose stable"
+                    else:          # Longer sleep = higher glucose
+                        if b == short_b:
+                            current_impact = "Short sleep is lowering your glucose"
+                        elif b == long_b:
+                            current_impact = "Long sleep is raising your glucose"
+                        else:
+                            current_impact = "Adequate sleep is keeping your glucose stable"
+                    break
+
     # Build user-friendly response
-    lines = [f"**Last 24 hours:** {last_24h_sleep}"]
+    lines = [f"**Most recent night with data:** {latest_label}"]
     lines.append("")
     lines.append(f"**Current impact:** {current_impact}")
     lines.append("")  # blank line
-    
-    if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
+
+    if not significant:
         summary = f"Sleep duration showed minimal effect on glucose"
     elif delta > 0:
         summary = f"Longer sleep → Lower glucose ({abs(delta)} mg/dL difference)"
     else:
         summary = f"Longer sleep → Higher glucose ({abs(delta)} mg/dL difference)"
-    
+
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
     

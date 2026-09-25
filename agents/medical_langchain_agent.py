@@ -196,6 +196,14 @@ These rules ensure CONSISTENT responses for the same question, every time:
    - These questions ask for PROGRESS/TREND comparison (first day vs last day), not a single snapshot
    - The trend chart shows the patient's glucose CONTROL TRAJECTORY — not a point-in-time AGP profile
 
+1b. **FASTING / MORNING GLUCOSE = get_fbs_trend ONLY**
+   - "fasting glucose", "fasting glucose pattern", "fasting blood sugar", "FBS", "FBS trend",
+     "morning glucose", "morning sugar", "what is X's fasting glucose" → get_fbs_trend.
+   - The word "pattern" here does NOT mean the high/low pattern tool, and "glucose" here does
+     NOT mean get_glucose_trend. "Fasting" / "morning" / "FBS" wins over both.
+   - get_fbs_trend returns a finished paragraph (fasting level + normal/impaired/diabetic
+     classification). Relay it verbatim — do not reformat, relabel, or add numbers.
+
 2. **"SHOW ME THE AGP" / "GLUCOSE PROFILE" = get_agp_chart ONLY**
    - Questions like "show me the AGP", "glucose profile", "AGP chart for patient X" are SNAPSHOT questions
    - MUST call: get_agp_chart with include_tir=false, include_agp=true (or include_tir=true if TIR is also mentioned)
@@ -665,7 +673,8 @@ These rules ensure CONSISTENT responses for the same question, every time:
      * "glucose trend(s)", "how has glucose changed over time", "show the trend"
    - GLUCOSE HIGH/LOW PATTERNS ("when does glucose go high/low", "when do spikes/drops happen")
      → get_specific_medical_value with analysis_type pattern_high / pattern_low (see the rule
-     above). Do NOT route these to get_glucose_trend.
+     above). Do NOT route these to get_glucose_trend. This is HIGH/LOW timing ONLY —
+     "fasting glucose pattern" / "morning glucose" is NOT this; that → get_fbs_trend (rule 1b).
 
    - analyze_glucose_correlations is ONLY for a request that EXPLICITLY asks for a correlation
      or to "correlate" (e.g. "what's the correlation between activity and glucose?", "correlate
@@ -868,9 +877,9 @@ For ANY summary request, ALWAYS call get_patient_summary with parameters:
 
 4. **Food Log Entries with Images** — list the entries as a NUMBERED list (1., 2., 3.). Each entry is ONE block in this EXACT order:
    - Header: the numbered, bold meal type + time — e.g. "**1. Breakfast — 08:00 AM**" (if no time is present, "**1. Breakfast**"). NEVER put the time anywhere else.
-   - Next line: "**Description:** <description>"
+   - Next line: "  **Description:** <description>"
    - If at least one of calories/carbs_g/protein_g/fat_g is present: the NEXT line is:
-     "Calories: <calories> kcal, Carbs: <carbs_g> g, Protein: <protein_g> g, Fat: <fat_g> g".
+     "  Calories: <calories> kcal, Carbs: <carbs_g> g, Protein: <protein_g> g, Fat: <fat_g> g".
      Omit any individual field that is null; skip the whole "Macro nutrients" block if all four are null.
    - LAST: the image (if "url" is present and non-empty) as Markdown on its own line: ![<description>](the_url_value). Never write the literal words "Food Log Image"; never skip an entry that has a url. If there is no url, omit this step.
 
@@ -950,7 +959,8 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     PatientSummaryTool(),
                     AGPChartTool(),
                     EHbA1cTIRTool(),
-                    CorrelationAnalysisTool()
+                    CorrelationAnalysisTool(),
+                   
                 ]
 
                 for tool in tools:
@@ -994,6 +1004,7 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     EHbA1cTIRTool(),
                     BPTrendTool(),
                     CorrelationAnalysisTool(),
+                    
                 ]
 
                 for tool in tools:

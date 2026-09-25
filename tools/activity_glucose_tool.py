@@ -96,51 +96,52 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
 
     low_b, high_b = buckets[0], buckets[-1]
     delta = low_b["avg_glucose"] - high_b["avg_glucose"]
+    significant = abs(delta) >= settings.MIN_GLUCOSE_DIFFERENCE_MGDL
 
-    # Get last 24 hours activity data
-    last_24h_activity = "N/A"
+    # Most recent day that actually has both readings. `days` is not date-sorted,
+    # so take the max date — this is the latest day WITH data, NOT "the last 24 hours".
+    latest_label = "N/A"
     current_impact = "Unknown"
     if days:
-        last_day = days[-1]
-        last_24h_activity = f"{int(last_day[1]):,} steps"
-        
-        # Determine which bucket the last day falls into
-        steps = last_day[1]
-        for b in buckets:
-            rows = b.get("rows", [])
-            if any(row[1] == steps for row in rows):
-                # Found the bucket
-                if delta > 0:  # Higher activity = lower glucose
-                    if b == low_b:
-                        current_impact = "Low activity is raising your glucose"
-                    elif b == high_b:
-                        current_impact = "High activity is lowering your glucose"
-                    else:
-                        current_impact = "Medium activity is keeping your glucose moderate"
-                elif delta < 0:  # Higher activity = higher glucose
-                    if b == low_b:
-                        current_impact = "Low activity is lowering your glucose"
-                    elif b == high_b:
-                        current_impact = "High activity is raising your glucose"
-                    else:
-                        current_impact = "Medium activity is keeping your glucose moderate"
-                else:  # No difference
-                    current_impact = "Activity shows minimal effect on your glucose"
-                break
-    
+        last_day = max(days, key=lambda r: r[0])
+        latest_label = f"{last_day[0]:%d %b %Y} — {int(last_day[1]):,} steps"
+
+        if not significant:
+            # Below the significance threshold: keep this consistent with Summary.
+            current_impact = "Activity shows minimal effect on your glucose"
+        else:
+            steps = last_day[1]
+            for b in buckets:
+                if any(row[1] == steps for row in b.get("rows", [])):
+                    if delta > 0:  # Higher activity = lower glucose
+                        if b == low_b:
+                            current_impact = "Low activity is raising your glucose"
+                        elif b == high_b:
+                            current_impact = "High activity is lowering your glucose"
+                        else:
+                            current_impact = "Medium activity is keeping your glucose moderate"
+                    else:          # Higher activity = higher glucose
+                        if b == low_b:
+                            current_impact = "Low activity is lowering your glucose"
+                        elif b == high_b:
+                            current_impact = "High activity is raising your glucose"
+                        else:
+                            current_impact = "Medium activity is keeping your glucose moderate"
+                    break
+
     # Build user-friendly response
-    lines = [f"**Last 24 hours:** {last_24h_activity}"]
+    lines = [f"**Most recent day with data:** {latest_label}"]
     lines.append("")
     lines.append(f"**Current impact:** {current_impact}")
     lines.append("")  # blank line
-    
-    if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
+
+    if not significant:
         summary = f"Activity showed minimal effect on glucose"
     elif delta > 0:
         summary = f"Higher activity → Lower glucose ({abs(delta)} mg/dL difference)"
     else:
         summary = f"Higher activity → Higher glucose ({abs(delta)} mg/dL difference)"
-    
+
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
     

@@ -99,6 +99,61 @@ def _glucose_direction_phrase(glucose_daily: list) -> str:
     arrow = "upward" if delta > 0 else "downward"
     return f"trending {arrow} (about {first} \u2192 {last} mg/dL)"
 
+def _fbs_band(v: float) -> str:
+    """ADA fasting classification for a fasting blood-sugar value (mg/dL)."""
+    if v < 100:
+        return "normal"
+    if v < 126:
+        return "impaired (prediabetic range)"
+    return "diabetic range"
+
+def _fbs_direction_phrase(values: list) -> str:
+    if len(values) < 4:
+        return "fairly steady (only a few days of data)"
+    mid = len(values) // 2
+    first = round(sum(values[:mid]) / mid)
+    last = round(sum(values[mid:]) / (len(values) - mid))
+    delta = last - first
+    if abs(delta) < settings.MIN_GLUCOSE_DIFFERENCE_MGDL:
+        return "stable throughout the period"
+    if delta > 0:
+        return f"rising over the period (from {first} to {last} mg/dL)"
+    return f"falling over the period (from {first} to {last} mg/dL)"
+
+def _format_fbs_prose(summary: dict, from_date: str, to_date: str, values: list = None) -> str:
+    """Fasting Blood Sugar answer, delivered verbatim (chat_routes bypass). Every
+    number comes straight from the API's per-day `fbs` field via _summarize -- the
+    SAME source get_fbs_trend charts -- so the level here always matches the trend."""
+    n = summary.get("days_count", 0)
+    try:
+        d1 = datetime.strptime(from_date, "%Y-%m-%d")
+        d2 = datetime.strptime(to_date, "%Y-%m-%d")
+        if d1.year == d2.year:
+            date_range = f"{d1.strftime('%B')} {d1.day} to {d2.strftime('%B')} {d2.day}, {d2.year}"
+        else:
+            date_range = f"{d1.strftime('%B')} {d1.day}, {d1.year} to {d2.strftime('%B')} {d2.day}, {d2.year}"
+    except (ValueError, TypeError):
+        date_range = f"{from_date} to {to_date}"
+
+    if not n:
+        return (
+            f"No fasting blood sugar (FBS) values are recorded over {date_range}, "
+            f"so a fasting pattern can't be assessed."
+        )
+
+    avg = summary["avg_fbs"]
+    lo, hi = summary["min_fbs"], summary["max_fbs"]
+    band = _fbs_band(avg)
+    days = "day" if n == 1 else "days"
+    pattern = _fbs_direction_phrase(values or [])
+    return (
+        f"**Fasting Glucose \u2014 {band.capitalize()}**\n\n"
+        f"- **Pattern:** {pattern[:1].upper() + pattern[1:]}\n"
+        f"- **Average fasting glucose:** {avg} mg/dL\n"
+        f"- **Daily readings ranged:** {lo} to {hi} mg/dL\n"
+        f"- **Measured over:** {n} {days} ({date_range})"
+    )
+
 
 def _format_glucose_trend_prose(summary: dict, from_date: str, to_date: str,
                                 glucose_daily: Optional[list] = None,
@@ -687,7 +742,19 @@ class HealthProgressBase(BaseTool):
         elif metric == "hba1c":
             base_payload["summary"] = self._summarize(metric, glucose_daily, data)
         elif metric == "fbs":
-            base_payload["summary"] = self._summarize(metric, glucose_daily, data)
+            fbs_summary = self._summarize("fbs", glucose_daily, data)
+            _fbs_rows = sorted((d for d in glucose_daily
+                                if d.get("fbs") is not None and d.get("glucoseDate")),
+                               key=lambda d: d["glucoseDate"])
+            fbs_values = [d["fbs"] for d in _fbs_rows]
+            label_from = _fbs_rows[0]["glucoseDate"] if _fbs_rows else from_date
+            label_to = _fbs_rows[-1]["glucoseDate"] if _fbs_rows else to_date
+            fbs_prose = _format_fbs_prose(fbs_summary, label_from, label_to, fbs_values)
+            # Deliver verbatim, bypassing the LLM's formatting (same side-channel as
+            # glucose/AGP/eHbA1c). chat_routes returns this text directly.
+            if user_context is not None:
+                user_context['_last_fbs_trend_text'] = fbs_prose
+            return fbs_prose
         elif metric == "sleep":
             if chart_data is not None:
                 base_payload["summary"] = self._summarize(metric, glucose_daily, data)
@@ -826,10 +893,11 @@ class GlucoseTrendTool(HealthProgressBase):
     name: str = "get_glucose_trend"
     description: str = (
         "Get a patient's glucose trend over a date range: mean glucose, "
-        "TIR/TAR/TBR %, HbA1c estimate, FBS, plus BP, medications, and "
+        "TIR/TAR/TBR %, HbA1c estimate, plus BP, medications, and "
         "assigned doctor/DHA. Use for: 'glucose trend', 'sugar levels this "
         "week', 'BP for patient X', 'what medications', 'who is their "
-        "doctor'." + _COMMON_TAIL
+        "doctor'. NOT for fasting or morning glucose / FBS -- use "
+        "get_fbs_trend for those." + _COMMON_TAIL
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
@@ -926,9 +994,13 @@ class HbA1cTrendTool(HealthProgressBase):
 class FBSTrendTool(HealthProgressBase):
     name: str = "get_fbs_trend"
     description: str = (
-        "Get a patient's Fasting Blood Sugar (FBS) trend chart over a date "
-        "range. Use for: 'fasting blood sugar', 'FBS trend', 'FBS for "
-        "patient X'." + _COMMON_TAIL
+        "Get a patient's Fasting Blood Sugar over a date range: the average "
+        "fasting level classified normal/impaired/diabetic, plus a trend chart. "
+        "This is the ONLY tool for fasting or morning glucose. Use for: 'fasting "
+        "glucose', 'fasting glucose pattern', 'fasting blood sugar', 'FBS', 'FBS "
+        "trend', 'morning glucose', 'morning sugar', 'what is X's fasting "
+        "glucose'. Do NOT use get_glucose_trend or the high/low pattern tool for "
+        "fasting/morning glucose." + _COMMON_TAIL
     )
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
