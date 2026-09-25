@@ -133,6 +133,7 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
     
     # Build user-friendly response
     lines = [f"**Last 24 hours:** {last_24h_sleep}"]
+    lines.append("")
     lines.append(f"**Current impact:** {current_impact}")
     lines.append("")  # blank line
     
@@ -147,7 +148,7 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
     lines.append("")  # blank line
     
     for b in buckets:
-        lines.append(f"• {b['label']}: {b['avg_glucose']} mg/dL")
+        lines.append(f"- {b['label']}: {b['avg_glucose']} mg/dL")
     
     return "\n".join(lines)
 

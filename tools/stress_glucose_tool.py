@@ -98,6 +98,7 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     
     # Build user-friendly response
     lines = [f"**Last 24 hours:** {last_24h_stress}"]
+    lines.append("")
     lines.append(f"**Current impact:** {current_impact}")
     lines.append("")  # blank line
     
@@ -110,8 +111,8 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
-    lines.append(f"• Lower stress (≤{round(med)}): {lower_g} mg/dL")
-    lines.append(f"• Higher stress (>{round(med)}): {higher_g} mg/dL")
+    lines.append(f"- Lower stress (≤{round(med)}): {lower_g} mg/dL")
+    lines.append(f"- Higher stress (>{round(med)}): {higher_g} mg/dL")
     
     return "\n".join(lines)
 

@@ -130,6 +130,7 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
     
     # Build user-friendly response
     lines = [f"**Last 24 hours:** {last_24h_activity}"]
+    lines.append("")
     lines.append(f"**Current impact:** {current_impact}")
     lines.append("")  # blank line
     
@@ -144,7 +145,7 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
     lines.append("")  # blank line
     
     for b in buckets:
-        lines.append(f"• {b['label']}: {b['avg_glucose']} mg/dL")
+        lines.append(f"- {b['label']}: {b['avg_glucose']} mg/dL")
     
     return "\n".join(lines)
 
