@@ -9,9 +9,13 @@ class FoodlogTool(BaseTool):
     """
     name: str = "get_foodlog"
     description: str = (
-        "Get the latest food log records for a patient. "
-        "You can filter by patient name or ID, set a date filter (YYYY-MM-DD), and limit the number of results (default 10). "
-        "Returns a list of food log entries with type, description, activity date, and other details."
+        "Get a patient's food log records. Filter by patient name or ID. "
+        "For a single day, pass date_filter (YYYY-MM-DD). "
+        "For a graph or any date range, pass from_date and to_date (YYYY-MM-DD), or a "
+        "period phrase (e.g. 'this week', 'last month', 'this cycle') in `period` — the "
+        "whole window is returned, not just the latest few. With no dates given, returns "
+        "the latest `limit` records (default 10). "
+        "Returns a list of food log entries with meal type, time, photo and macronutrient details."
     )
 
     def __init__(self):
@@ -24,14 +28,19 @@ class FoodlogTool(BaseTool):
         object.__setattr__(self, 'user_context', user_context)
 
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-            date_filter: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
+            date_filter: Optional[str] = None, from_date: Optional[str] = None,
+            to_date: Optional[str] = None, period: Optional[str] = None,
+            limit: int = 10) -> Dict[str, Any]:
         """
         Query food log records for a patient with role-based access control.
         Args:
             patient_id (int, optional): Patient ID.
             patient_name (str, optional): Patient name.
-            date_filter (str, optional): Date filter in YYYY-MM-DD format.
-            limit (int, optional): Max number of records to return.
+            date_filter (str, optional): Single date (YYYY-MM-DD) — one day's logs.
+            from_date (str, optional): Range start (YYYY-MM-DD).
+            to_date (str, optional): Range end (YYYY-MM-DD).
+            period (str, optional): Period phrase ('this week', 'last month', 'this cycle').
+            limit (int, optional): Max records when no date range is given.
         Returns:
             dict: Food log records and metadata.
         """
@@ -52,12 +61,73 @@ class FoodlogTool(BaseTool):
             except Exception:
                 return {"error": "Invalid date_filter format. Use YYYY-MM-DD."}
         with DatabaseManager() as db_manager:
-            return db_manager.get_foodlog(
+            result = db_manager.get_foodlog(
                 patient_id=patient_id,
                 patient_name=patient_name,
                 date_filter=date_obj,
-                limit=limit
-        )
+                from_date=from_date,
+                to_date=to_date,
+                period=period,
+                limit=limit,
+            )
+
+        # Stash a food-log graph payload for the frontend -- one marker per meal.
+        # response_builder gates `_last_foodlog_chart_data` behind the chart keywords,
+        # so "food log" gives the list and "food log graph" adds the graph.
+        uc = getattr(self, "user_context", None)
+        if uc is not None and isinstance(result, dict):
+            meals = []
+            for e in result.get("foodlog") or []:
+                iso = e.get("actual_time")
+                try:
+                    dt = datetime.fromisoformat(iso) if iso else None
+                except (ValueError, TypeError):
+                    dt = None
+                if not dt:
+                    continue
+                meals.append({
+                    "meal_type": e.get("meal_type"),
+                    # `date` lets the graph decide day vs week vs month; `time`
+                    # places the marker within the day.
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "time": dt.strftime("%I:%M %p"),
+                    "photo_url": e.get("url"),
+                    "calories": e.get("calories"),
+                    "carbs_g": e.get("carbs_g"),
+                    "protein_g": e.get("protein_g"),
+                    "fat_g": e.get("fat_g"),
+                })
+            if meals:
+                uc["_last_foodlog_chart_data"] = meals
+                # If the user explicitly asked for a GRAPH, replace the long
+                # photo/description list with a one-line caption so ONLY the graph
+                # shows (the graph itself carries each meal's photo + macros on hover).
+                q = (uc.get("_current_query") or "").lower()
+                if any(w in q for w in ("graph", "chart", "plot", "visual", "visualize", "diagram")):
+                    n = len(meals)
+
+                    def _nice(d):
+                        try:
+                            return datetime.strptime(d, "%Y-%m-%d").strftime("%B %d, %Y")
+                        except (ValueError, TypeError):
+                            return d
+
+                    df, dto = result.get("date_from"), result.get("date_to")
+                    if df and dto and df != dto:
+                        when = f" from {_nice(df)} to {_nice(dto)}"
+                    elif df:
+                        when = f" for {_nice(df)}"
+                    elif date_obj:
+                        when = f" for {date_obj.strftime('%B %d, %Y')}"
+                    else:
+                        when = ""
+                    uc["_last_foodlog_text"] = (
+                        f"Here is the food log timeline{when}, showing {n} logged "
+                        f"{'meal' if n == 1 else 'meals'}. Hover over any meal marker to "
+                        f"view its photo and macronutrient breakdown."
+                    )
+
+        return result
 
 
 class FoodlogUploadersTool(BaseTool):

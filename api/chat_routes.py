@@ -52,6 +52,7 @@ class QueryResponse(BaseModel):
     user_context: Optional[Dict[str, Any]] = None
     chart_data: Optional[Dict[str, Any]] = None  # present only when the answer includes a renderable chart
     suggestions: Optional[list] = None
+    foodLogData: Optional[list] = None 
  
  
 # Voice models (robust to camelCase & snake_case)
@@ -95,7 +96,7 @@ class VoiceQueryResponse(BaseModel):
     user_context: Optional[Dict[str, Any]] = None
     transcript: Optional[str] = None
     suggestions: Optional[list] = None
- 
+    foodLogData: Optional[list] = None 
  
 # =========================
 # Utilities / Helpers
@@ -327,7 +328,7 @@ async def handle_query(
             # One helper turns the agent turn into (text, charts). It reads
             # every deterministic-tool answer by convention and never drifts
             # between /query and /voice. See response_builder.resolve_agent_output.
-            response_text, chart_data, agp_chart_data, ehba1c_tir_data, suggestions = resolve_agent_output(
+            response_text, chart_data, agp_chart_data, ehba1c_tir_data, suggestions,foodlog_chart_data = resolve_agent_output(
                 getattr(session_agent, "user_context", None), result
             )
 
@@ -345,6 +346,7 @@ async def handle_query(
                 agpChartData=agp_chart_data,
                 ehba1cTirData=ehba1c_tir_data,
                 suggestions=suggestions,
+                foodLogData=foodlog_chart_data,
                 user_context={
                     "user_id": current_user.user_id,
                     "role_name": current_user.role_name,
@@ -429,7 +431,7 @@ async def handle_voice_query(
         result = await session_agent.chat(query_with_context)
 
         # Same single helper as /query -- identical response semantics, no drift.
-        response_text, chart_data, agp_chart_data, ehba1c_tir_data,  suggestions  = resolve_agent_output(
+        response_text, chart_data, agp_chart_data, ehba1c_tir_data,  suggestions, foodlog_chart_data  = resolve_agent_output(
             getattr(session_agent, "user_context", None), result
         )
 
@@ -454,6 +456,7 @@ async def handle_voice_query(
             agpChartData=agp_chart_data,
             ehba1cTirData=ehba1c_tir_data,
             suggestions=suggestions,
+            foodLogData=foodlog_chart_data,
             user_context={
                 "user_id": current_user.user_id,
                 "role_name": current_user.role_name,
