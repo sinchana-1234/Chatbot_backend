@@ -14,9 +14,15 @@ from dal.postgres_db import SessionLocalPG
 from dal.cycle_window import cycle_window
 
 def _format_date(date_str):
-    """Convert date from yyyy-mm-dd to dd-mm-yyyy format"""
+    """Convert date from yyyy-mm-dd or yyyy-mm-dd HH:MM:SS to dd-mm-yyyy format"""
     try:
-        date_obj = datetime.strptime(str(date_str), "%Y-%m-%d")
+        date_str = str(date_str)
+        # Try datetime format first (2026-09-10 20:00:00)
+        if ' ' in date_str:
+            date_obj = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        else:
+            # Try date format (2026-09-10)
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
         return date_obj.strftime("%d-%m-%Y")
     except Exception:
         return str(date_str)
