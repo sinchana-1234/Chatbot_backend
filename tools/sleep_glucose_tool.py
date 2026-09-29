@@ -23,7 +23,7 @@ from typing import Optional, Any
 from langchain.tools import BaseTool
 from sqlalchemy import text
 
-from dal.postgres_db import SessionLocalPG, resolve_range, date_where
+from dal.postgres_db import SessionLocalPG, resolve_range, date_where, _label
 from config import settings
 from dal.database import DatabaseManager
 from dal.cycle_window import cycle_window
@@ -110,39 +110,39 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
         latest_label = f"{last_night[0]:%d %b %Y} — {round(last_night[1], 1)}h"
 
         if not significant:
-            current_impact = "Sleep duration shows minimal effect on your glucose"
+            current_impact = "sleep duration showed minimal association with glucose"
         else:
             sleep_hours = last_night[1]
             for b in buckets:
                 if any(row[1] == sleep_hours for row in b.get("rows", [])):
-                    if delta > 0:  # Longer sleep = lower glucose
+                    if delta > 0:  # longer sleep associated with lower glucose
                         if b == short_b:
-                            current_impact = "Short sleep is raising your glucose"
+                            current_impact = "short sleep was associated with higher glucose"
                         elif b == long_b:
-                            current_impact = "Long sleep is lowering your glucose"
+                            current_impact = "long sleep was associated with lower glucose"
                         else:
-                            current_impact = "Adequate sleep is keeping your glucose stable"
-                    else:          # Longer sleep = higher glucose
+                            current_impact = "adequate sleep was associated with mid-range glucose"
+                    else:          # longer sleep associated with higher glucose
                         if b == short_b:
-                            current_impact = "Short sleep is lowering your glucose"
+                            current_impact = "short sleep was associated with lower glucose"
                         elif b == long_b:
-                            current_impact = "Long sleep is raising your glucose"
+                            current_impact = "long sleep was associated with higher glucose"
                         else:
-                            current_impact = "Adequate sleep is keeping your glucose stable"
+                            current_impact = "adequate sleep was associated with mid-range glucose"
                     break
 
     # Build user-friendly response
     lines = [f"**Most recent night with data:** {latest_label}"]
     lines.append("")
-    lines.append(f"**Current impact:** {current_impact}")
+    lines.append(f"**Association:** {current_impact}")
     lines.append("")  # blank line
 
     if not significant:
-        summary = f"Sleep duration showed minimal effect on glucose"
+        summary = "Sleep duration showed minimal association with glucose"
     elif delta > 0:
-        summary = f"Longer sleep → Lower glucose ({abs(delta)} mg/dL difference)"
+        summary = f"Longer sleep was associated with ~{abs(delta)} mg/dL lower average glucose"
     else:
-        summary = f"Longer sleep → Higher glucose ({abs(delta)} mg/dL difference)"
+        summary = f"Longer sleep was associated with ~{abs(delta)} mg/dL higher average glucose"
 
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
@@ -247,10 +247,11 @@ class SleepGlucoseImpactTool(BaseTool):
                 cw = cycle_window(patient_id)
                 if cw:
                     start, end = cw
-                    label = f"{start} to {end}"
+                    label = _label(start, end)
             nights, first, last = _nightly_sleep_glucose(patient_id, start, end)
             answer = _format_sleep_glucose(display_name, nights, first, last)
             answer += f"\n\n_Period analyzed: {label}._"
+            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
 
             if uc is not None:
                 uc["_last_sleep_impact_text"] = answer

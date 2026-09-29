@@ -25,7 +25,7 @@ from typing import Optional, Any
 from langchain.tools import BaseTool
 from sqlalchemy import text
 
-from dal.postgres_db import SessionLocalPG, resolve_range, date_where
+from dal.postgres_db import SessionLocalPG, resolve_range, date_where, _label
 from dal.database import DatabaseManager
 from dal.cycle_window import cycle_window
 from config import settings
@@ -108,39 +108,39 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
 
         if not significant:
             # Below the significance threshold: keep this consistent with Summary.
-            current_impact = "Activity shows minimal effect on your glucose"
+            current_impact = "activity showed minimal association with glucose"
         else:
             steps = last_day[1]
             for b in buckets:
                 if any(row[1] == steps for row in b.get("rows", [])):
-                    if delta > 0:  # Higher activity = lower glucose
+                    if delta > 0:  # higher activity associated with lower glucose
                         if b == low_b:
-                            current_impact = "Low activity is raising your glucose"
+                            current_impact = "low activity was associated with higher glucose"
                         elif b == high_b:
-                            current_impact = "High activity is lowering your glucose"
+                            current_impact = "high activity was associated with lower glucose"
                         else:
-                            current_impact = "Medium activity is keeping your glucose moderate"
-                    else:          # Higher activity = higher glucose
+                            current_impact = "medium activity was associated with mid-range glucose"
+                    else:          # higher activity associated with higher glucose
                         if b == low_b:
-                            current_impact = "Low activity is lowering your glucose"
+                            current_impact = "low activity was associated with lower glucose"
                         elif b == high_b:
-                            current_impact = "High activity is raising your glucose"
+                            current_impact = "high activity was associated with higher glucose"
                         else:
-                            current_impact = "Medium activity is keeping your glucose moderate"
+                            current_impact = "medium activity was associated with mid-range glucose"
                     break
 
     # Build user-friendly response
     lines = [f"**Most recent day with data:** {latest_label}"]
     lines.append("")
-    lines.append(f"**Current impact:** {current_impact}")
+    lines.append(f"**Association:** {current_impact}")
     lines.append("")  # blank line
 
     if not significant:
-        summary = f"Activity showed minimal effect on glucose"
+        summary = "Activity showed minimal association with glucose"
     elif delta > 0:
-        summary = f"Higher activity → Lower glucose ({abs(delta)} mg/dL difference)"
+        summary = f"Higher activity was associated with ~{abs(delta)} mg/dL lower average glucose"
     else:
-        summary = f"Higher activity → Higher glucose ({abs(delta)} mg/dL difference)"
+        summary = f"Higher activity was associated with ~{abs(delta)} mg/dL higher average glucose"
 
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
@@ -244,10 +244,11 @@ class ActivityGlucoseImpactTool(BaseTool):
                 cw = cycle_window(patient_id)
                 if cw:
                     start, end = cw
-                    label = f"{start} to {end}"
+                    label = _label(start, end)
             days = _daily_activity_glucose(patient_id, start, end)
             answer = _format_activity_glucose(display_name, days)
             answer += f"\n\n_Period analyzed: {label}._"
+            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
 
             if uc is not None:
                 uc["_last_activity_impact_text"] = answer

@@ -162,6 +162,7 @@ class LifestyleGlucoseImpactTool(BaseTool):
                     label = f"{_format_iso_date(start)} to {_format_iso_date(end)}"  # Returns: "11-09-2026 to 25-09-2026"
             answer = _format_combined(display_name, requested, patient_id, start, end)
             answer += f"\n\n_Period analyzed: {label}._"
+            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
 
             if uc is not None:
                 uc["_last_lifestyle_impact_text"] = answer

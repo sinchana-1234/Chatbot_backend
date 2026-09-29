@@ -23,7 +23,7 @@ from typing import Optional, Any
 from langchain.tools import BaseTool
 from sqlalchemy import text
 
-from dal.postgres_db import SessionLocalPG, resolve_range, date_where
+from dal.postgres_db import SessionLocalPG, resolve_range, date_where, _label
 from dal.database import DatabaseManager
 from config import settings
 from dal.cycle_window import cycle_window
@@ -84,32 +84,32 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
         latest_label = f"{last_day[0]:%d %b %Y} — {round(last_day[1])}/100"
 
         if not significant:
-            current_impact = "Stress shows minimal effect on your glucose"
+            current_impact = "stress showed minimal association with glucose"
         else:
             last_stress = last_day[1]
-            if delta > 0:  # Higher stress = higher glucose
+            if delta > 0:  # higher stress associated with higher glucose
                 if last_stress <= med:
-                    current_impact = "Lower stress is lowering your glucose"
+                    current_impact = "lower stress was associated with lower glucose"
                 else:
-                    current_impact = "Higher stress is raising your glucose"
-            else:          # Higher stress = lower glucose
+                    current_impact = "higher stress was associated with higher glucose"
+            else:          # higher stress associated with lower glucose
                 if last_stress <= med:
-                    current_impact = "Lower stress is raising your glucose"
+                    current_impact = "lower stress was associated with higher glucose"
                 else:
-                    current_impact = "Higher stress is lowering your glucose"
+                    current_impact = "higher stress was associated with lower glucose"
 
     # Build user-friendly response
     lines = [f"**Most recent day with data:** {latest_label}"]
     lines.append("")
-    lines.append(f"**Current impact:** {current_impact}")
+    lines.append(f"**Association:** {current_impact}")
     lines.append("")  # blank line
 
     if not significant:
-        summary = f"Stress showed minimal effect on glucose"
+        summary = "Stress showed minimal association with glucose"
     elif delta > 0:
-        summary = f"Higher stress → Higher glucose ({abs(delta)} mg/dL difference)"
+        summary = f"Higher stress was associated with ~{abs(delta)} mg/dL higher average glucose"
     else:
-        summary = f"Higher stress → Lower glucose ({abs(delta)} mg/dL difference)"
+        summary = f"Higher stress was associated with ~{abs(delta)} mg/dL lower average glucose"
 
     lines.append(f"**Summary:** {summary}")
     lines.append("")  # blank line
@@ -212,10 +212,11 @@ class StressGlucoseImpactTool(BaseTool):
                 cw = cycle_window(patient_id)
                 if cw:
                     start, end = cw
-                    label = f"{start} to {end}"
+                    label = _label(start, end)
             days, first, last = _daily_stress_glucose(patient_id, start, end)
             answer = _format_stress_glucose(display_name, days, first, last)
             answer += f"\n\n_Period analyzed: {label}._"
+            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
 
             if uc is not None:
                 uc["_last_stress_impact_text"] = answer

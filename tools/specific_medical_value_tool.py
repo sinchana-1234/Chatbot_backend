@@ -48,6 +48,13 @@ _READING_LABEL = {
     "heart_rate": "heart rate",
 }
 
+# _PATTERN_UNITS = {
+#     "glucose": "mg/dL",
+#     "blood_pressure": "mmHg",
+#     "spo2": "%",
+#     "heart_rate": "bpm",
+# }
+
 def _pattern_band_of(h):
     for rng, lbl in _PATTERN_BANDS:
         if h in rng:
@@ -80,49 +87,52 @@ def _pattern_top_bands(bands_seen, n):
 
 def _format_pattern_prose(patient_name, reading_type, analysis_type, hourly_pattern):
     is_high = analysis_type == "pattern_high"
-    adj = "elevated" if is_high else "low"
-    Adj = "Elevated" if is_high else "Low"
+    cond = "high" if is_high else "low"      # header: "high glucose" / "low glucose"
+    Adj  = "High" if is_high else "Low"      # bullet:  "High on 1 day"
     label = _READING_LABEL.get(reading_type, reading_type.replace("_", " "))
     name = patient_name or "This patient"
 
-    # Clinical-safety rule enforced in CODE (was a prompt instruction): only call
-    # an hour a recurring PATTERN if it recurs on 2+ distinct days.
-    recurring = sorted(
-        (e for e in hourly_pattern if e.get("distinct_days", 0) >= 2),
-        key=lambda e: e.get("distinct_days", 0),
-        reverse=True,
-    )
-    if not recurring:
-        prep = "above" if is_high else "below"
-        return (f"{name}'s {label} readings {prep} the threshold look like "
-                f"isolated single-day episodes, not a recurring time-of-day pattern.")
-    top = recurring[:5]
+    # One layout for BOTH high and low. We no longer split "recurring" vs
+    # "isolated" into two different-looking answers. The single-day vs multi-day
+    # distinction is carried ONLY by the closing sentence, so we still never
+    # overclaim a recurring daily pattern from one day's readings.
+    episodes = [e for e in hourly_pattern if e.get("distinct_days", 0) >= 1]
+    if not episodes:
+        return f"{name} had no {cond} {label} episodes in this period."
 
-    lead_bands = _pattern_top_bands([_pattern_band_of(e["hour_of_day"]) for e in top], 2)
-    lead = (f"{name}'s {label} levels are most frequently {adj} during the "
-            f"{_pattern_join(lead_bands)} hours.")
+    # Frequency first (most days), then chronological within the same frequency.
+    shown = sorted(episodes, key=lambda e: (-e["distinct_days"], e["hour_of_day"]))
 
-    bullets = [
-        f"* **{_pattern_hour_range(e['hour_of_day'])}** — {Adj} on {e['distinct_days']} days " +
-        (f"({', '.join(e.get('day_list', [])[:3])}" + (f", +{len(e.get('day_list', [])) - 3} more)" if len(e.get('day_list', [])) > 3 else ")")
-        if e.get('day_list') else "")
-        for e in top
-    ]
+    bullets = []
+    for e in shown:
+        n = e["distinct_days"]
+        day_word = "day" if n == 1 else "days"
+        days = ", ".join(e.get("day_list", []))
+        dates = f" ({days})" if days else ""
+        bullets.append(f"* **{_pattern_hour_range(e['hour_of_day'])}** \u2014 {Adj} on {n} {day_word}{dates}")
 
-    h0 = top[0]["hour_of_day"]
-    peak = "around midnight" if h0 in (23, 0, 1) else f"in the {_pattern_band_of(h0)} hours"
-    rest = [_pattern_band_of(e["hour_of_day"]) for e in top[1:]
-            if _pattern_band_of(e["hour_of_day"]) != _pattern_band_of(h0)]
-    overall = (f"Overall pattern: {Adj} {label} occurs most frequently {peak}"
-               + (f" and during the {_pattern_join(rest)} hours." if rest else "."))
+    header = f"Yes. {name} had {cond} {label} episodes. The episodes occurred during:"
 
-    return lead + "\nThe main periods are:\n\n" + "\n".join(bullets) + "\n\n" + overall
+    # Bands say WHEN in the day; the date clause keeps it honest about WHETHER it repeats.
+    bands = _pattern_top_bands([_pattern_band_of(e["hour_of_day"]) for e in shown], 3)
+    band_phrase = _pattern_join(bands)
+    all_dates = sorted({d for e in shown for d in e.get("day_list", [])},
+                       key=lambda s: s.split("-")[::-1])   # dd-mm-yyyy → sort by y,m,d
+    if len(all_dates) == 1:
+        lo = min(e["hour_of_day"] for e in shown)
+        hi = max(e["hour_of_day"] for e in shown)
+        span = f"between {_pattern_h12(lo)} and {_pattern_h12((hi + 1) % 24)}"
+        overall = (f"Overall pattern: {Adj} {label} episodes occurred during the "
+                   f"{band_phrase} hours, {span} on {all_dates[0]}.")
+    else:
+        overall = (f"Overall pattern: {Adj} {label} episodes occurred across the "
+                   f"{band_phrase} hours.")
+
+    return header + "\n\n" + "\n".join(bullets) + "\n\n" + overall
 
 def _friendly_dt(ts):
-    """Render a reading timestamp for humans:
-    '2026-07-13 00:00:00' -> 'July 13, 2026 at 12:00 AM'.
-    Midnight becomes '12:00 AM', not the raw '00:00:00' the model was
-    echoing. Windows-safe (avoids %-d / %-I, which crash on Windows)."""
+    """Render a reading timestamp as 'DD-MM-YYYY HH:MM' (24h), matching the
+    DD-MM-YYYY convention used across the chatbot. Windows-safe."""
     if ts is None:
         return None
     if not isinstance(ts, datetime):
@@ -130,11 +140,7 @@ def _friendly_dt(ts):
             ts = datetime.fromisoformat(str(ts))
         except Exception:
             return str(ts)
-    hour = ts.hour
-    suffix = "AM" if hour < 12 else "PM"
-    hour12 = 12 if hour % 12 == 0 else hour % 12
-    clock = f"{hour12}:{ts.minute:02d} {suffix}"
-    return ts.strftime("%B ") + str(ts.day) + f", {ts.year} at {clock}"
+    return ts.strftime("%d-%m-%Y %H:%M")
 
 
 class SpecificMedicalValueTool(BaseTool):
@@ -150,14 +156,15 @@ class SpecificMedicalValueTool(BaseTool):
         "aggregate (count/min/max/avg computed over ALL matching rows, never a truncated "
         "slice) plus the time each extreme occurred and the date range actually covered; "
         "'pattern_high' — for 'when does glucose go high', 'when do spikes happen', "
-        "'what time does X's sugar rise' — buckets every reading above a threshold "
+        "'what time does X's sugar rise', OR 'has <patient> had any high glucose "
+        "episodes', 'any highs for <patient>' — buckets every reading above a threshold "
         "(default 180 for glucose) by hour-of-day across the FULL history and reports, "
         "per hour, how many DISTINCT CALENDAR DAYS contributed a reading — an hour with "
         "distinct_days=1 is a single isolated episode, not a recurring pattern, and must "
         "be reported as such; "
         "'pattern_low' — same as pattern_high but for readings below a threshold "
         "(default 70 for glucose), for 'when does glucose go low', 'when do drops/lows "
-        "happen'. "
+        "happen', 'has <patient> had any low glucose episodes', 'any lows for <patient>'. "
         "An optional threshold parameter overrides the default cutoff for pattern_high/"
         "pattern_low. "
         "DO NOT use this for multi-day trend CHARTS — use the get_*_trend tools instead "
@@ -506,7 +513,7 @@ class SpecificMedicalValueTool(BaseTool):
                 # -------------------------
                 if analysis_type in ("pattern_high", "pattern_low"):
                     default_thresholds = {
-                        "glucose": {"pattern_high": 180, "pattern_low": 70},
+                        "glucose": {"pattern_high": 200, "pattern_low": 70},
                         "blood_pressure": {"pattern_high": 140, "pattern_low": 90},
                         "spo2": {"pattern_high": 100, "pattern_low": 92},
                         "heart_rate": {"pattern_high": 100, "pattern_low": 60},
@@ -520,7 +527,7 @@ class SpecificMedicalValueTool(BaseTool):
                                      f"'{reading_type}'. Please pass an explicit threshold."
                         })
 
-                    comparison = ">=" if analysis_type == "pattern_high" else "<="
+                    comparison = ">" if analysis_type == "pattern_high" else "<"
 
                     rows = db.execute(
                         text(f"""
@@ -552,13 +559,10 @@ class SpecificMedicalValueTool(BaseTool):
                     all_days = set()
                     for val, ts, hr, day in rows:
                         hr = int(hr)
-                        day_str = str(day)  # Normalize to string ONCE
+                        day_str = str(day)          # ISO 'YYYY-MM-DD' — sorts chronologically
                         all_days.add(day_str)
-                        b = buckets.setdefault(hr, {"count": 0, "days": set(), "day_list": [], "examples": []})
+                        b = buckets.setdefault(hr, {"count": 0, "days": set(), "examples": []})
                         b["count"] += 1
-                        if day_str not in b["days"]:  # Only add date once per day
-                            formatted_date = _format_date(day_str)
-                            b["day_list"].append(formatted_date)
                         b["days"].add(day_str)
                         if len(b["examples"]) < 3:
                             b["examples"].append({"value": float(val), "time": str(ts)})
@@ -568,7 +572,11 @@ class SpecificMedicalValueTool(BaseTool):
                             "hour_of_day": hr,
                             "count": b["count"],
                             "distinct_days": len(b["days"]),
-                            "day_list": sorted(b["day_list"]),
+                            # Sort the ISO day strings FIRST (chronological even across
+                            # months), THEN format to dd-mm-yyyy. The old code sorted the
+                            # already-formatted dd-mm-yyyy strings, which mis-ordered dates
+                            # spanning two months (e.g. 30-08 before 05-09).
+                            "day_list": [_format_date(d) for d in sorted(b["days"])],
                             "example_readings": b["examples"],
                         }
                         for hr, b in sorted(buckets.items(), key=lambda kv: -kv[1]["count"])

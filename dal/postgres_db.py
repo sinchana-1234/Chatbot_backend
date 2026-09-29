@@ -149,15 +149,16 @@ def _resolve_period(p: str, today: date):
 
 
 def _label(start, end) -> str:
-    """Human-readable span for the response. Windows-safe (no %-d)."""
+    """Span for the response, in DD-MM-YYYY. Accepts date objects OR
+    'YYYY-MM-DD' strings (the cycle-window fallback passes strings)."""
     if not start and not end:
         return "all available data"
-    try:
-        s = start.strftime("%B ") + str(start.day) + f", {start.year}"
-        e = end.strftime("%B ") + str(end.day) + f", {end.year}"
-    except AttributeError:
-        return "all available data"
-    return f"{s} to {e}"
+    def _fmt(d):
+        if hasattr(d, "strftime"):
+            return d.strftime("%d-%m-%Y")
+        parts = str(d).split("-")            # 'YYYY-MM-DD' -> 'DD-MM-YYYY'
+        return "-".join(reversed(parts)) if len(parts) == 3 else str(d)
+    return f"{_fmt(start)} to {_fmt(end)}"
 
 
 def resolve_range(from_date=None, to_date=None, period=None, today=None):

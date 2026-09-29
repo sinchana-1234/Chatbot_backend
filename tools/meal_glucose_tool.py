@@ -23,13 +23,17 @@ from typing import Optional, Dict, Any
 from langchain.tools import BaseTool
 from sqlalchemy import text
 
-from dal.postgres_db import SessionLocalPG, resolve_range, date_where
+from dal.postgres_db import SessionLocalPG, resolve_range, date_where, _label
 from dal.database import DatabaseManager
 from dal.cycle_window import cycle_window
 from config import settings
 
 logger = logging.getLogger(__name__)
 
+def _ddmmyyyy(iso):
+    """'2026-09-09' -> '09-09-2026'. Leaves anything unexpected untouched."""
+    parts = str(iso).split("-")
+    return "-".join(reversed(parts)) if len(parts) == 3 else str(iso)
 
 _MEAL_TYPE_NORMALIZE = {
     "break fast": "Breakfast",
@@ -242,10 +246,13 @@ class MealGlucoseImpactTool(BaseTool):
                 cw = cycle_window(patient_id)
                 if cw:
                     start, end = cw
-                    label = f"{start} to {end}"
+                    label = _label(start, end)
             meals = _correlate(patient_id, start, end)
             answer = _format_meal_impact(display_name, meals)
-            answer += f"\n\n_Period analyzed: {label}._"
+            if start and end:
+                answer += f"\n\n_Period analyzed: {_ddmmyyyy(start)} to {_ddmmyyyy(end)}._"
+            else:
+                answer += f"\n\n_Period analyzed: {label}._"
 
             # Deliver verbatim via the same side-channel the other tools use.
             if uc is not None:
