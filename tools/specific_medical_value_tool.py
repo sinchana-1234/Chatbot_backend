@@ -474,7 +474,9 @@ class SpecificMedicalValueTool(BaseTool):
                     # Reading type labels for display
                     reading_labels = {
                         "glucose": "glucose",
-                        "blood_pressure": "blood pressure",
+                        # overview averages the systolic column only — label it honestly,
+                        # never a bare "blood pressure" (which implies both numbers).
+                        "blood_pressure": "systolic blood pressure",
                         "heart_rate": "heart rate",
                         "spo2": "SpO2",
                         "stress": "stress",
@@ -503,6 +505,14 @@ class SpecificMedicalValueTool(BaseTool):
 
                     if user_context is not None:
                         user_context['_last_overview_text'] = overview_prose
+                        # Structured copy for the concerns tool (additive; return value unchanged)
+                        user_context['_last_overview_data'] = {
+                            "patient_id": patient_id,
+                            "lowest": float(min_reading[0]),
+                            "highest": float(max_reading[0]),
+                            "average": round(float(agg_row[3]), 1) if agg_row[3] is not None else None,
+                            "count": cnt, "period_from": period_from, "period_to": period_to,
+                        }
                     return overview_prose
 
                 # -------------------------
@@ -599,6 +609,12 @@ class SpecificMedicalValueTool(BaseTool):
                     )
                     if user_context is not None:
                         user_context['_last_pattern_text'] = pattern_text
+                        # Structured copy for the concerns tool (keyed by type so high/low don't collide)
+                        user_context[f'_last_{analysis_type}_data'] = {
+                            "analysis_type": analysis_type,
+                            "threshold": effective_threshold,
+                            "hourly_pattern": hourly_pattern,
+                        }
                     return pattern_text
 
                 # -------------------------

@@ -69,35 +69,38 @@ def _fmt_period_range(start_iso, end_iso, fallback):
         return fallback
 
 
-def _format_ehba1c_tir_prose(name, first_day, last_day, scope):
-    """Deterministic first->last prose, delivered verbatim. States each metric's own
-    direction factually — no global 'positive'/'improvement' verdict."""
+def _format_ehba1c_tir_prose(name, first_day, last_day, scope, avg_glucose=None):
+    """Deterministic first->last summary, delivered verbatim. Leads with the OBSERVED
+    average glucose (fetched separately) when available; each metric states its own
+    direction — no global 'improvement' verdict."""
     if not first_day or not last_day:
         return None
     name = name or "This patient"
     ft, lt = first_day.get("tir"), last_day.get("tir")
     fe, le = first_day.get("ehba1c"), last_day.get("ehba1c")
 
-    clauses = []
+    bullets = []
+    if avg_glucose is not None:
+        bullets.append(f"* Average glucose: {avg_glucose} mg/dL")
     if ft is not None and lt is not None:
         if lt > ft:
-            clauses.append(f"time in range improved from {_fmt_pct(ft)}% to {_fmt_pct(lt)}%")
+            bullets.append(f"* Time in range improved from {_fmt_pct(ft)}% to {_fmt_pct(lt)}%")
         elif lt < ft:
-            clauses.append(f"time in range dropped from {_fmt_pct(ft)}% to {_fmt_pct(lt)}%")
+            bullets.append(f"* Time in range dropped from {_fmt_pct(ft)}% to {_fmt_pct(lt)}%")
         else:
-            clauses.append(f"time in range held at {_fmt_pct(ft)}%")
+            bullets.append(f"* Time in range held at {_fmt_pct(ft)}%")
     if fe is not None and le is not None:
         if le > fe:
-            clauses.append(f"estimated eHbA1c edged up from {_fmt_pct(fe, 2)}% to {_fmt_pct(le, 2)}%")
+            bullets.append(f"* eHbA1c edged up from {_fmt_pct(fe, 2)}% to {_fmt_pct(le, 2)}%")
         elif le < fe:
-            clauses.append(f"estimated eHbA1c eased down from {_fmt_pct(fe, 2)}% to {_fmt_pct(le, 2)}%")
+            bullets.append(f"* eHbA1c eased down from {_fmt_pct(fe, 2)}% to {_fmt_pct(le, 2)}%")
         else:
-            clauses.append(f"estimated eHbA1c held at {_fmt_pct(fe, 2)}%")
+            bullets.append(f"* eHbA1c held at {_fmt_pct(fe, 2)}%")
 
-    if not clauses:
+    if not bullets:
         return None
     period_str = _fmt_period_range(first_day.get("periodStart"), last_day.get("periodEnd"), scope)
-    return f"{name}'s " + ", while ".join(clauses) + f".\n\n_Analyzed period: {period_str}_"
+    return f"{name}'s diabetes control ({period_str}):\n\n" + "\n".join(bullets)
 
 class EHbA1cTIRTool(BaseTool):
     """Fetches a patient's eHbA1c/TIR trend data (first day vs last day,
@@ -122,7 +125,9 @@ class EHbA1cTIRTool(BaseTool):
     - "How is patient X progressing?" / "compare this month with last month"
     - "eHbA1c trend for patient X" / "TIR history for patient X"
     - "eHbA1c trend on 2026-05-23" (specific_date="2026-05-23")
-    - "how has patient X's glucose control changed over time"
+    - "how is patient X's diabetes control" / "how has diabetes control changed"
+    NOTE: for plain 'glucose trend' or 'how has glucose changed over time'
+    (average glucose over the period), use get_glucose_trend instead.
     """
 
     def __init__(self):
@@ -306,7 +311,13 @@ class EHbA1cTIRTool(BaseTool):
             # Deliver the trend as finished verbatim prose (same bypass as glucose/meals)
             # so the wording is deterministic and never overstated.
             if user_context is not None and not specific_date:
-                prose = _format_ehba1c_tir_prose(display_name, first_day, last_day, scope)
+                avg_glucose = None
+                try:
+                    from tools.health_progress_tool import fetch_window_avg_glucose
+                    avg_glucose = fetch_window_avg_glucose(patient_id, from_date, to_date, token)
+                except Exception:
+                    avg_glucose = None
+                prose = _format_ehba1c_tir_prose(display_name, first_day, last_day, scope, avg_glucose)
                 if prose:
                     user_context['_last_ehba1c_tir_text'] = prose
 

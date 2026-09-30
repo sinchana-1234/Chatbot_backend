@@ -163,7 +163,18 @@ def _ensure_wav(audio_path: str) -> str:
         # fallback: hand original to Whisper (may still work)
         return audio_path
  
- 
+def _validate_pinned_patient(requested_patient_id: int, current_user: UserContext) -> int:
+    """Per-patient chat pin: trust a browser-sent patient_id ONLY if it belongs to
+    THIS staff member's own patient list. get_authorized_patient_id does NOT do this
+    (privileged roles get the requested id unchecked), so this is the real IDOR guard."""
+    from dal.database import DatabaseManager
+    with DatabaseManager() as dm:
+        roster = dm.get_doctor_patients(doctor_user_id=current_user.user_id, active_only=True)
+    if any(p.get("patient_id") == requested_patient_id for p in roster):
+        return requested_patient_id
+    raise HTTPException(status_code=403, detail="This patient is not in your patient list.")
+
+
 def get_or_create_session_agent(session_id: Optional[str] = None, openai_api_key: Optional[str] = None) -> tuple:
     """Get existing session agent or create new one (kept compatible with new/old agent signatures)."""
     global session_agents
@@ -288,6 +299,13 @@ async def handle_query(
  
         # Authorize patient access
         authorized_patient_id = get_authorized_patient_id(requested_patient_id, current_user)
+
+        # Per-patient chat: if the browser pinned a patient, it must be one of
+        # this staff member's own patients. Patients (role 1) are already locked
+        # to themselves by every tool, so no pin needed for them.
+        active_patient_id = None
+        if requested_patient_id is not None and current_user.role_id != 1:
+            active_patient_id = _validate_pinned_patient(requested_patient_id, current_user)
  
         # Build context
         if current_user.role_id == 1:  # Patient
@@ -318,6 +336,7 @@ async def handle_query(
                     'role_name': current_user.role_name,
                     'can_access_all_patients': current_user.can_access_all_patients,
                     'authorized_patient_id': authorized_patient_id,
+                    'active_patient_id': active_patient_id,
                     'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None,
                     'token': current_user.token
                 })
@@ -400,6 +419,11 @@ async def handle_voice_query(
         # 3) Build query context (mirror /query)
         requested_patient_id = request.patient_id
         authorized_patient_id = get_authorized_patient_id(requested_patient_id, current_user)
+
+        # Per-patient pin — same roster validation as /query.
+        active_patient_id = None
+        if requested_patient_id is not None and current_user.role_id != 1:
+            active_patient_id = _validate_pinned_patient(requested_patient_id, current_user)
  
         if current_user.role_id == 1:
             query_with_context = f"[Patient Query - User ID: {current_user.user_id}] {transcript}"
@@ -423,6 +447,7 @@ async def handle_voice_query(
                 'role_name': current_user.role_name,
                 'can_access_all_patients': current_user.can_access_all_patients,
                 'authorized_patient_id': authorized_patient_id,
+                'active_patient_id': active_patient_id, 
                 'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None,
                 'token': current_user.token
             })

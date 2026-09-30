@@ -110,10 +110,10 @@ def _format_meal_impact(patient_name: Optional[str], meals: list) -> str:
     lines = [
         f"**Meal Impact on Glucose \u2014 {name}**",
         "",
-        f"{top['type']} had the biggest effect, raising glucose by an average of "
+        f"{top['type']} showed the largest average glucose rise, about "
         f"**+{top['avg']} mg/dL** across {top['n']} meals.",
         "",
-        "**Biggest single spike:**",
+        "**Largest observed single rise:**",
         f"{dish}{carbs} \u2014 {t['date_str']}, glucose rose "
         f"**{t['baseline']} \u2192 {t['peak']} mg/dL**.",
         "",

@@ -47,7 +47,26 @@ if not HEALTH_PROGRESS_BASE:
         "HEALTH_PROGRESS_BASE_URL is not set in .env — HealthProgressTool cannot function without it."
     )
 
-
+def fetch_window_avg_glucose(patient_id: int, from_date: str, to_date: str,
+                             auth_token: str) -> Optional[int]:
+    """OBSERVED average glucose (mean of daily meanGlucose) for a window, from the
+    SAME glucoseDailyAnalytics source GlucoseTrendTool uses. Returns None on any
+    failure so callers omit the figure rather than break. Never derived from eHbA1c."""
+    if not HEALTH_PROGRESS_BASE:
+        return None
+    try:
+        resp = httpx.get(
+            f"{HEALTH_PROGRESS_BASE}/{patient_id}/{from_date}/{to_date}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        daily = (resp.json() or {}).get("glucoseDailyAnalytics") or []
+        means = [d["meanGlucose"] for d in daily if d.get("meanGlucose") is not None]
+        return round(sum(means) / len(means)) if means else None
+    except Exception:
+        return None
+    
 def _thin_axis_labels(dates: list) -> list:
     """Keep every data point but show an x-axis label only at period-appropriate
     boundaries, so long ranges stay readable. Returns a list the SAME length as
@@ -894,7 +913,8 @@ class GlucoseTrendTool(HealthProgressBase):
     description: str = (
         "Get a patient's glucose trend over a date range: mean glucose, "
         "TIR/TAR/TBR %, HbA1c estimate, plus BP, medications, and "
-        "assigned doctor/DHA. Use for: 'glucose trend', 'sugar levels this "
+        "assigned doctor/DHA. Use for: 'glucose trend', 'glucose trends', "
+        "'how has glucose changed over time', 'sugar levels this "
         "week', 'BP for patient X', 'what medications', 'who is their "
         "doctor'. NOT for fasting or morning glucose / FBS -- use "
         "get_fbs_trend for those." + _COMMON_TAIL

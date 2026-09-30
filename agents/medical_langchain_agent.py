@@ -18,6 +18,9 @@ from tools.health_progress_tool import (
     ActivityTrendTool, HeartRateTrendTool, StressHRVTrendTool,
     HbA1cTrendTool, FBSTrendTool, BPTrendTool
 )
+from tools.patient_concerns_tool import PatientConcernsTool
+import inspect
+import functools
 
 try:
     from langchain.agents import create_openai_tools_agent, AgentExecutor
@@ -56,6 +59,79 @@ except ImportError as e:
     print(f"Medical tools not available: {e}")
 
 logger = logging.getLogger(__name__)
+
+# Tools that answer ACROSS MANY patients (not about one named patient) —
+# e.g. "which patients have high glucose", "who uploaded a food log", "list my patients".
+# These are turned off inside a single-patient chat.
+_MULTI_PATIENT_TOOL_NAMES = {"MultiPatientAnalysisTool", "FoodlogUploadersTool", "DoctorPatientMappingTool"}
+
+
+def _pin_tool_to_patient(tool, active_patient_id):
+    """Force ONE tool to act only on active_patient_id: set patient_id /
+    patient_identifier to it and null any patient_name the model passed.
+    Binds incoming args to the real signature first, so a patient_id passed
+    positionally can't collide with our injected one."""
+    orig_run = tool._run
+    try:
+        run_sig = inspect.signature(orig_run)
+        run_params = set(run_sig.parameters)
+    except (TypeError, ValueError):
+        run_sig, run_params = None, set()
+
+    @functools.wraps(orig_run)
+    def _pinned_run(*args, **kwargs):
+        if run_sig is not None:
+            try:
+                bound = run_sig.bind_partial(*args, **kwargs)
+                if "patient_id" in run_params:
+                    bound.arguments["patient_id"] = active_patient_id
+                if "patient_identifier" in run_params:
+                    bound.arguments["patient_identifier"] = active_patient_id
+                if "patient_name" in run_params:
+                    bound.arguments["patient_name"] = None
+                return orig_run(**bound.arguments)
+            except TypeError:
+                pass
+        return orig_run(*args, **kwargs)
+
+    object.__setattr__(tool, "_run", _pinned_run)
+
+    orig_arun = getattr(tool, "_arun", None)
+    if callable(orig_arun):
+        try:
+            arun_sig = inspect.signature(orig_arun)
+            arun_params = set(arun_sig.parameters)
+        except (TypeError, ValueError):
+            arun_sig, arun_params = None, set()
+
+        @functools.wraps(orig_arun)
+        async def _pinned_arun(*args, **kwargs):
+            if arun_sig is not None:
+                try:
+                    bound = arun_sig.bind_partial(*args, **kwargs)
+                    if "patient_id" in arun_params:
+                        bound.arguments["patient_id"] = active_patient_id
+                    if "patient_identifier" in arun_params:
+                        bound.arguments["patient_identifier"] = active_patient_id
+                    if "patient_name" in arun_params:
+                        bound.arguments["patient_name"] = None
+                    return await orig_arun(**bound.arguments)
+                except TypeError:
+                    pass
+            return await orig_arun(*args, **kwargs)
+
+        object.__setattr__(tool, "_arun", _pinned_arun)
+
+
+def _apply_patient_pin(tools, active_patient_id):
+    """Per-patient chat: drop roster tools, pin every remaining tool to the patient."""
+    kept = []
+    for tool in tools:
+        if tool.__class__.__name__ in _MULTI_PATIENT_TOOL_NAMES:
+            continue
+        _pin_tool_to_patient(tool, active_patient_id)
+        kept.append(tool)
+    return kept
 
 class MedicalLangChainAgent:
     """
@@ -144,6 +220,23 @@ get_activity_trend, get_heart_rate_trend, get_stress_hrv_trend) — never
 get_specific_medical_value for a date range or trend-style question.
 """
 
+            # Per-patient (pinned) chat: lock the model to one patient and stop it from
+            # flailing on cross-patient questions (tools are already server-locked; this
+            # only makes the refusal clean and avoids max-iteration loops).
+            if self.user_context and self.user_context.get('active_patient_id'):
+                role_instructions += """
+
+🔒 **SINGLE-PATIENT CHAT — LOCKED TO ONE PATIENT**
+- This conversation is limited to ONE patient. Every medical tool is already locked to
+  that patient on the server, so treat EVERY question as being about this patient — even
+  if the user types a different patient's name. Do NOT ask which patient.
+- If the user asks about OTHER or MULTIPLE patients ("which patients…", "list patients",
+  "who has…", "compare patients", "who uploaded…"), do NOT call any tool. Reply in ONE
+  short sentence that this chat is limited to this patient (say "this patient", never a
+  patient ID number) and offer to check this patient instead. Do not retry or call tools
+  repeatedly for such a question.
+"""
+
             # Patient database info - role-based visibility
             patient_db_info = ""
             if self.user_context and self.user_context.get('role_id') == 1:  # Patient role
@@ -180,6 +273,28 @@ your own memory of prior conversations.
 {role_instructions}
 
 {patient_db_info}
+
+🧭 **ASSOCIATION-ONLY WORDING (applies to ALL answers):**
+When answering open-ended questions that combine glucose findings from lifestyle
+factors, meals, or other observational data, describe relationships as ASSOCIATIONS
+only. Do NOT state or imply that a factor caused a glucose change, and do NOT
+recommend lifestyle interventions based solely on these associations. When you
+present observational relationships, end with: "These are associations in the
+available data and do not by themselves establish cause."
+
+🔎 **FOLLOW-UP / MONITORING QUESTIONS (e.g. "what should I follow up on?", "what
+should be followed up?", "what should I monitor?"):**
+Summarize the observed findings that may warrant review. Do NOT prescribe,
+recommend, encourage, or suggest interventions or lifestyle changes unless the
+question EXPLICITLY asks for recommendations. Use observational/associational
+language and do not imply that changing a factor will improve glucose. Frame each
+point as something to REVIEW, with the observed value — e.g. "Review the overnight
+and late-morning low-glucose episodes (lowest recorded: 34 mg/dL)", "Review the
+afternoon high-glucose episodes (highest recorded: 221 mg/dL)", "Review the larger
+post-lunch rises (average +49 mg/dL)", "Review the observed associations with
+activity, sleep, and stress." End with: "These are areas identified from the
+available data and do not by themselves establish the cause of the observed glucose
+patterns."
 
 ⚡ **CRITICAL TOOL SELECTION RULES (DETERMINISTIC - DO NOT DEVIATE):**
 
@@ -942,6 +1057,7 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
 
                 tools = [
                     SpecificMedicalValueTool(),
+                    PatientConcernsTool(),     
                     SimpleMedicalAnalysisTool(),
                     MedicationsTool(),
                     FoodlogTool(),
@@ -975,6 +1091,7 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                 logger.info("Creating full-access tools for medical staff")
                 tools = [
                     SpecificMedicalValueTool(),
+                    PatientConcernsTool(),     
                     MultiPatientAnalysisTool(),
                     SimpleMedicalAnalysisTool(),
                     HospitalDocumentSearchTool(),
@@ -1014,7 +1131,12 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                             logger.debug(f"✅ Set user context on {tool.__class__.__name__}")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to set user context on {tool.__class__.__name__}: {e}")
-
+                
+                # PER-PATIENT CHAT: chat_routes validated a pinned patient →
+                # hard-lock every tool to it and remove cross-patient tools.
+                active_patient_id = self.user_context.get('active_patient_id') if self.user_context else None
+                if active_patient_id:
+                    tools = _apply_patient_pin(tools, active_patient_id)
             return tools
 
         except Exception as e:
