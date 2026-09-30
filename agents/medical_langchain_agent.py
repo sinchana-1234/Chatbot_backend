@@ -224,17 +224,22 @@ get_specific_medical_value for a date range or trend-style question.
             # flailing on cross-patient questions (tools are already server-locked; this
             # only makes the refusal clean and avoids max-iteration loops).
             if self.user_context and self.user_context.get('active_patient_id'):
-                role_instructions += """
+                _locked_name = self.user_context.get('active_patient_name') or "this patient"
+                role_instructions += f"""
 
-🔒 **SINGLE-PATIENT CHAT — LOCKED TO ONE PATIENT**
-- This conversation is limited to ONE patient. Every medical tool is already locked to
-  that patient on the server, so treat EVERY question as being about this patient — even
-  if the user types a different patient's name. Do NOT ask which patient.
-- If the user asks about OTHER or MULTIPLE patients ("which patients…", "list patients",
-  "who has…", "compare patients", "who uploaded…"), do NOT call any tool. Reply in ONE
-  short sentence that this chat is limited to this patient (say "this patient", never a
-  patient ID number) and offer to check this patient instead. Do not retry or call tools
-  repeatedly for such a question.
+🔒 **SINGLE-PATIENT CHAT — LOCKED TO {_locked_name}**
+- This conversation is limited to ONE patient: {_locked_name}. Every medical tool is
+  already locked to this patient on the server, so no other patient's data can ever be
+  retrieved here.
+- ANSWER normally, using the tools, when the question names NO patient, says
+  "the patient"/"this patient", or names {_locked_name}. The tools return {_locked_name}'s data.
+- REFUSE when the question explicitly asks about a DIFFERENT patient — any other patient
+  name, a patient ID number, or wording like "another patient"/"other patients"/
+  "which patients"/"list patients"/"compare patients"/"who has…". Then do NOT call any
+  tool and reply with EXACTLY this one sentence:
+  "This chat is limited to {_locked_name}. I can only answer questions about this patient here."
+- NEVER switch patients, NEVER retrieve another patient's data, and NEVER silently answer
+  a different-patient question as {_locked_name}. Do not ask which patient.
 """
 
             # Patient database info - role-based visibility
@@ -295,6 +300,12 @@ post-lunch rises (average +49 mg/dL)", "Review the observed associations with
 activity, sleep, and stress." End with: "These are areas identified from the
 available data and do not by themselves establish the cause of the observed glucose
 patterns."
+
+
+🔒 **NEVER SHOW THE INTERNAL PATIENT ID:** Any "[... For Patient ID: N]" tag in the
+query is internal routing metadata. NEVER repeat, display, or mention that numeric
+patient ID to the user. Refer to the patient by name if known, otherwise as "this
+patient". For greetings or small talk, reply normally without stating any patient ID.
 
 ⚡ **CRITICAL TOOL SELECTION RULES (DETERMINISTIC - DO NOT DEVIATE):**
 

@@ -163,15 +163,18 @@ def _ensure_wav(audio_path: str) -> str:
         # fallback: hand original to Whisper (may still work)
         return audio_path
  
-def _validate_pinned_patient(requested_patient_id: int, current_user: UserContext) -> int:
-    """Per-patient chat pin: trust a browser-sent patient_id ONLY if it belongs to
-    THIS staff member's own patient list. get_authorized_patient_id does NOT do this
-    (privileged roles get the requested id unchecked), so this is the real IDOR guard."""
+# AFTER
+def _validate_pinned_patient(requested_patient_id: int, current_user: UserContext) -> Tuple[int, Optional[str]]:
+    """Per-patient chat pin: trust a browser-sent patient_id ONLY if it belongs to THIS
+    staff member's own patient list. Returns (patient_id, display_name) so the agent can
+    name the locked patient and refuse switches to a DIFFERENT one."""
     from dal.database import DatabaseManager
     with DatabaseManager() as dm:
         roster = dm.get_doctor_patients(doctor_user_id=current_user.user_id, active_only=True)
-    if any(p.get("patient_id") == requested_patient_id for p in roster):
-        return requested_patient_id
+    for p in roster:
+        if p.get("patient_id") == requested_patient_id:
+            name = (f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".strip().title()) or None
+            return requested_patient_id, name
     raise HTTPException(status_code=403, detail="This patient is not in your patient list.")
 
 
@@ -304,14 +307,19 @@ async def handle_query(
         # this staff member's own patients. Patients (role 1) are already locked
         # to themselves by every tool, so no pin needed for them.
         active_patient_id = None
+        active_patient_name = None
         if requested_patient_id is not None and current_user.role_id != 1:
-            active_patient_id = _validate_pinned_patient(requested_patient_id, current_user)
+            active_patient_id, active_patient_name = _validate_pinned_patient(requested_patient_id, current_user)
  
         # Build context
         if current_user.role_id == 1:  # Patient
             query_with_context = f"[Patient Query - User ID: {current_user.user_id}] {query}"
         else:
-            if authorized_patient_id:
+            if active_patient_id:
+                # Per-patient chat: tools are already locked to this patient server-side,
+                # so the model needs no ID here — and must never show it to the user.
+                query_with_context = f"[Medical Staff Query - Single-Patient Chat] {query}"
+            elif authorized_patient_id:
                 query_with_context = f"[Medical Staff Query - For Patient ID: {authorized_patient_id}] {query}"
             else:
                 query_with_context = f"[Medical Staff Query - General] {query}"
@@ -337,6 +345,7 @@ async def handle_query(
                     'can_access_all_patients': current_user.can_access_all_patients,
                     'authorized_patient_id': authorized_patient_id,
                     'active_patient_id': active_patient_id,
+                    'active_patient_name': active_patient_name, 
                     'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None,
                     'token': current_user.token
                 })
@@ -422,13 +431,18 @@ async def handle_voice_query(
 
         # Per-patient pin — same roster validation as /query.
         active_patient_id = None
+        active_patient_name = None
         if requested_patient_id is not None and current_user.role_id != 1:
-            active_patient_id = _validate_pinned_patient(requested_patient_id, current_user)
+            active_patient_id, active_patient_name = _validate_pinned_patient(requested_patient_id, current_user)
  
         if current_user.role_id == 1:
             query_with_context = f"[Patient Query - User ID: {current_user.user_id}] {transcript}"
         else:
-            if authorized_patient_id:
+            if active_patient_id:
+                # Per-patient chat: tools are already locked to this patient server-side,
+                # so the model needs no ID here — and must never show it to the user.
+                query_with_context = f"[Medical Staff Query - Single-Patient Chat] {transcript}"
+            elif authorized_patient_id:
                 query_with_context = f"[Medical Staff Query - For Patient ID: {authorized_patient_id}] {transcript}"
             else:
                 query_with_context = f"[Medical Staff Query - General] {transcript}"
@@ -448,6 +462,7 @@ async def handle_voice_query(
                 'can_access_all_patients': current_user.can_access_all_patients,
                 'authorized_patient_id': authorized_patient_id,
                 'active_patient_id': active_patient_id, 
+                'active_patient_name': active_patient_name,
                 'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None,
                 'token': current_user.token
             })

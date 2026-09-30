@@ -251,7 +251,7 @@ class SleepGlucoseImpactTool(BaseTool):
             nights, first, last = _nightly_sleep_glucose(patient_id, start, end)
             answer = _format_sleep_glucose(display_name, nights, first, last)
             answer += f"\n\n_Period analyzed: {label}._"
-            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
+            
 
             if uc is not None:
                 uc["_last_sleep_impact_text"] = answer

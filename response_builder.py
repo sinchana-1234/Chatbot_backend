@@ -33,7 +33,22 @@ _FOODLOG_CHART_KEY = "_last_foodlog_chart_data"
 _SUGGESTIONS_KEY = "_last_suggestions"
 
 _CHART_KEYWORDS = ("graph", "chart", "plot", "visual", "visualize", "diagram")
+import re
 
+# The internal DB patient ID must never surface to the user. Strip mentions like
+# "with patient ID 1002", "(Patient ID: 1002)", "patient #1002", "for patient id: 1002".
+_PATIENT_ID_RE = re.compile(
+    r'[\(\[]?\s*(?:for |with |about )?patient\s*(?:id|#)\s*[:\-]?\s*#?\d+\s*[\)\]]?',
+    re.IGNORECASE,
+)
+
+def _strip_patient_id(text):
+    if not text:
+        return text
+    cleaned = _PATIENT_ID_RE.sub(' ', text)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned)           # collapse double spaces
+    cleaned = re.sub(r'\s+([?.!,;:])', r'\1', cleaned)  # no space before punctuation
+    return cleaned.strip()
 
 def _wants_chart(user_context: Optional[Dict[str, Any]]) -> bool:
     """True only when the user explicitly asked for a visual (trend charts are opt-in)."""
@@ -60,7 +75,7 @@ def resolve_agent_output(
     result_chart = result.get("chart_data") if isinstance(result, dict) else None
 
     if not user_context:
-        return fallback, result_chart, None, None, None, None
+        return _strip_patient_id(fallback), result_chart, None, None, None, None
 
     agp_chart_data = user_context.pop(_AGP_CHART_KEY, None)
     ehba1c_tir_data = user_context.pop(_EHBA1C_CHART_KEY, None)
@@ -93,4 +108,5 @@ def resolve_agent_output(
         ehba1c_tir_data = None
         foodlog_chart_data = None   
 
+    response_text = _strip_patient_id(response_text)
     return response_text, chart_data, agp_chart_data, ehba1c_tir_data, suggestions,foodlog_chart_data

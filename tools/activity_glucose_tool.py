@@ -248,7 +248,7 @@ class ActivityGlucoseImpactTool(BaseTool):
             days = _daily_activity_glucose(patient_id, start, end)
             answer = _format_activity_glucose(display_name, days)
             answer += f"\n\n_Period analyzed: {label}._"
-            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
+           
 
             if uc is not None:
                 uc["_last_activity_impact_text"] = answer

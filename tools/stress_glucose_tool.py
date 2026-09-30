@@ -216,7 +216,7 @@ class StressGlucoseImpactTool(BaseTool):
             days, first, last = _daily_stress_glucose(patient_id, start, end)
             answer = _format_stress_glucose(display_name, days, first, last)
             answer += f"\n\n_Period analyzed: {label}._"
-            answer += "\n\n_These are associations in the available data and do not by themselves establish cause._"
+           
 
             if uc is not None:
                 uc["_last_stress_impact_text"] = answer
