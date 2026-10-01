@@ -134,7 +134,7 @@ def _format_sleep_glucose(name: Optional[str], nights: list, first=None, last=No
     # Build user-friendly response
     lines = [f"**Most recent night with data:** {latest_label}"]
     lines.append("")
-    lines.append(f"**Association:** {current_impact}")
+    lines.append(f"**Observed pattern:** {current_impact}")
     lines.append("")  # blank line
 
     if not significant:

@@ -132,7 +132,7 @@ def _format_activity_glucose(name: Optional[str], days: list) -> str:
     # Build user-friendly response
     lines = [f"**Most recent day with data:** {latest_label}"]
     lines.append("")
-    lines.append(f"**Association:** {current_impact}")
+    lines.append(f"**Observed pattern:** {current_impact}")
     lines.append("")  # blank line
 
     if not significant:

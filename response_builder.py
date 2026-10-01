@@ -46,8 +46,13 @@ def _strip_patient_id(text):
     if not text:
         return text
     cleaned = _PATIENT_ID_RE.sub(' ', text)
-    cleaned = re.sub(r'\s{2,}', ' ', cleaned)           # collapse double spaces
-    cleaned = re.sub(r'\s+([?.!,;:])', r'\1', cleaned)  # no space before punctuation
+    # collapse runs of spaces/tabs ONLY — never newlines, so blank lines
+    # (paragraph breaks) and bullet lists in the tool output survive.
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+    # drop a leftover space/tab sitting before punctuation (same line only)
+    cleaned = re.sub(r'[ \t]+([?.!,;:])', r'\1', cleaned)
+    # tidy any trailing space the ID removal left at a line end
+    cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
     return cleaned.strip()
 
 def _wants_chart(user_context: Optional[Dict[str, Any]]) -> bool:

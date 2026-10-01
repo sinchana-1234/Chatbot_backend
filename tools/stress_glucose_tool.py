@@ -101,7 +101,7 @@ def _format_stress_glucose(name: Optional[str], days: list, first=None, last=Non
     # Build user-friendly response
     lines = [f"**Most recent day with data:** {latest_label}"]
     lines.append("")
-    lines.append(f"**Association:** {current_impact}")
+    lines.append(f"**Observed pattern:** {current_impact}")
     lines.append("")  # blank line
 
     if not significant:

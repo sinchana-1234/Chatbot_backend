@@ -99,33 +99,85 @@ class FoodlogTool(BaseTool):
                 })
             if meals:
                 uc["_last_foodlog_chart_data"] = meals
-                # If the user explicitly asked for a GRAPH, replace the long
-                # photo/description list with a one-line caption so ONLY the graph
-                # shows (the graph itself carries each meal's photo + macros on hover).
+
+                # Resolve the window label once (used by both branches).
+                def _nice(d):
+                    try:
+                        return datetime.strptime(d, "%Y-%m-%d").strftime("%B %d, %Y")
+                    except (ValueError, TypeError):
+                        return d
+
+                df, dto = result.get("date_from"), result.get("date_to")
+                if df and dto and df != dto:
+                    when = f" from {_nice(df)} to {_nice(dto)}"
+                elif df:
+                    when = f" for {_nice(df)}"
+                elif date_obj:
+                    when = f" for {date_obj.strftime('%B %d, %Y')}"
+                else:
+                    when = ""
+
+                n = len(meals)
                 q = (uc.get("_current_query") or "").lower()
-                if any(w in q for w in ("graph", "chart", "plot", "visual", "visualize", "diagram")):
-                    n = len(meals)
+                wants_graph = any(w in q for w in
+                                  ("graph", "chart", "plot", "visual", "visualize", "diagram"))
 
-                    def _nice(d):
-                        try:
-                            return datetime.strptime(d, "%Y-%m-%d").strftime("%B %d, %Y")
-                        except (ValueError, TypeError):
-                            return d
-
-                    df, dto = result.get("date_from"), result.get("date_to")
-                    if df and dto and df != dto:
-                        when = f" from {_nice(df)} to {_nice(dto)}"
-                    elif df:
-                        when = f" for {_nice(df)}"
-                    elif date_obj:
-                        when = f" for {date_obj.strftime('%B %d, %Y')}"
-                    else:
-                        when = ""
+                if wants_graph:
+                    # Graph asked for: one-line caption; the graph carries each
+                    # meal's photo + macros on hover.
                     uc["_last_foodlog_text"] = (
                         f"Here is the food log timeline{when}, showing {n} logged "
                         f"{'meal' if n == 1 else 'meals'}. Hover over any meal marker to "
                         f"view its photo and macronutrient breakdown."
                     )
+                else:
+                    # No graph: build the item list DETERMINISTICALLY, with a blank
+                    # line between every element, so markdown never collapses it to
+                    # one line (the LLM used single newlines -> rendered as spaces).
+                    def _g(v):   # round macro grams/kcal to 1 dp, drop trailing .0
+                        try:
+                            f = round(float(v), 1)
+                        except (TypeError, ValueError):
+                            return v
+                        return int(f) if f == int(f) else f
+
+                    out = [f"Here is the food log{when}, showing {n} logged "
+                           f"{'meal' if n == 1 else 'meals'}:", ""]
+                    for i, e in enumerate(result.get("foodlog") or [], 1):
+                        iso = e.get("actual_time")
+                        try:
+                            dt = datetime.fromisoformat(iso) if iso else None
+                        except (ValueError, TypeError):
+                            dt = None
+                        mtype = (e.get("meal_type") or "Meal").title()
+                        tstr = dt.strftime("%I:%M %p") if dt else ""
+                        desc = e.get("description") or ""   # <-- confirm this field name
+                        macros = []
+                        if e.get("calories") is not None:
+                            macros.append(f"Calories: {_g(e['calories'])} kcal")
+                        if e.get("carbs_g") is not None:
+                            macros.append(f"Carbs {_g(e['carbs_g'])} g")
+                        if e.get("protein_g") is not None:
+                            macros.append(f"Protein {_g(e['protein_g'])} g")
+                        if e.get("fat_g") is not None:
+                            macros.append(f"Fat {_g(e['fat_g'])} g")
+
+                        header = f"**{i}. {mtype}"
+                        if tstr:
+                            header += f" — {tstr}"
+                        header += "**"
+                        out.append(header)
+                        out.append("")
+                        if desc:
+                            out.append(f"**Description:** {desc}")
+                            out.append("")
+                        if macros:
+                            out.append(" , ".join(macros))
+                            out.append("")
+                        if e.get("url"):
+                            out.append(f"![{mtype}]({e['url']})")
+                            out.append("")
+                    uc["_last_foodlog_text"] = "\n".join(out).strip()
 
         return result
 
